@@ -12,6 +12,8 @@
 #include "fs.h"
 #include "process.h"
 #include "editor.h"
+#include "speaker.h"
+#include "snake.h"
 
 #define CMD_BUFFER_SIZE 256
 #define MAX_ARGS 16
@@ -82,14 +84,15 @@ static void cmd_help(void) {
     help_row("  color <0-F> Change text color",         "  write <f> t Write text to file");
     help_row("  history     Command history",           "  rm <name>   Delete file/dir");
     help_row("  calc <expr> Calculator (+ - * / %)",    "  edit <f>    Text editor");
-    help_row("  matrix      Matrix rain effect",        NULL);
-    help_row("  sleep <sec> Sleep N seconds",           NULL);
-    help_row("  logo        Show AI_OS logo",           NULL);
+    help_row("  matrix      Matrix rain effect",        "  beep <hz>   Play a tone");
+    help_row("  sleep <sec> Sleep N seconds",           "  play <notes> Play notes");
+    help_row("  logo        Show AI_OS logo",           "  song        Play a melody");
     vga_print_colored(" Processes:                             ", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
     vga_print_colored("System:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
     help_row("  ps          List processes",            "  panic <t>   Test crash handler");
     help_row("  kill <pid>  Kill process",              "  reboot      Reboot system");
     help_row("  run <prog>  Background program",        "  halt        Shutdown");
+    help_row("  snake       Play Snake!",               NULL);
     vga_print_colored("              ", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
     vga_print_colored("(clock, counter, fib)\n", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
 }
@@ -594,6 +597,85 @@ static void cmd_panic(int argc, char *argv[]) {
     }
 }
 
+/* ---- Sound commands ---- */
+
+static void cmd_beep(int argc, char *argv[]) {
+    if (argc < 2) {
+        vga_print("\n  Usage: beep <freq> [duration_ms]\n");
+        vga_print("  Example: beep 440 500\n\n");
+        return;
+    }
+    int freq = str_to_int(argv[1]);
+    int dur = (argc >= 3) ? str_to_int(argv[2]) : 200;
+    if (freq < 20 || freq > 20000) { vga_print("\n  Freq: 20-20000 Hz\n\n"); return; }
+    if (dur < 10) dur = 10;
+    if (dur > 5000) dur = 5000;
+    vga_print("\n  ");
+    vga_print_dec(freq);
+    vga_print(" Hz for ");
+    vga_print_dec(dur);
+    vga_print(" ms\n\n");
+    speaker_beep(freq, dur / 10);
+}
+
+static void cmd_play(int argc, char *argv[]) {
+    if (argc < 2) {
+        vga_print("\n  Usage: play <notes>\n");
+        vga_print("  Notes: C D E F G A B (lowercase=oct3, UPPER=oct5)\n");
+        vga_print("  Example: play C D E F G A B\n\n");
+        return;
+    }
+    vga_putchar('\n');
+    for (int i = 1; i < argc; i++) {
+        char n = argv[i][0];
+        if (n == '-' || n == '.') {
+            timer_wait(10); /* rest */
+        } else {
+            int oct = (n >= 'a' && n <= 'g') ? 3 : 5;
+            speaker_play_note(n, oct, 12);
+            timer_wait(2);
+        }
+    }
+    vga_putchar('\n');
+}
+
+static void cmd_song(void) {
+    vga_print_colored("\n  Playing melody...\n\n", VGA_COLOR(VGA_LIGHT_MAGENTA, VGA_BLACK));
+    /* Ode to Joy - Beethoven */
+    static const uint16_t notes[] = {
+        NOTE_E4, NOTE_E4, NOTE_F4, NOTE_G4,
+        NOTE_G4, NOTE_F4, NOTE_E4, NOTE_D4,
+        NOTE_C4, NOTE_C4, NOTE_D4, NOTE_E4,
+        NOTE_E4, NOTE_D4, NOTE_D4, 0,
+        NOTE_E4, NOTE_E4, NOTE_F4, NOTE_G4,
+        NOTE_G4, NOTE_F4, NOTE_E4, NOTE_D4,
+        NOTE_C4, NOTE_C4, NOTE_D4, NOTE_E4,
+        NOTE_D4, NOTE_C4, NOTE_C4, 0
+    };
+    static const uint8_t durations[] = {
+        12, 12, 12, 12,
+        12, 12, 12, 12,
+        12, 12, 12, 12,
+        16, 6, 20, 8,
+        12, 12, 12, 12,
+        12, 12, 12, 12,
+        12, 12, 12, 12,
+        16, 6, 20, 8
+    };
+    for (int i = 0; i < 32; i++) {
+        if (notes[i] == 0) {
+            timer_wait(durations[i]);
+        } else {
+            speaker_beep(notes[i], durations[i]);
+        }
+        timer_wait(2);
+    }
+}
+
+static void cmd_snake(void) {
+    snake_run();
+}
+
 /* ---- Command dispatcher ---- */
 
 static void execute_command(char *input) {
@@ -632,6 +714,11 @@ static void execute_command(char *input) {
     else if (str_eq(argv[0], "run"))     cmd_run(argc, argv);
     /* Debug */
     else if (str_eq(argv[0], "panic"))   cmd_panic(argc, argv);
+    /* Sound & Games */
+    else if (str_eq(argv[0], "beep"))    cmd_beep(argc, argv);
+    else if (str_eq(argv[0], "play"))    cmd_play(argc, argv);
+    else if (str_eq(argv[0], "song"))    cmd_song();
+    else if (str_eq(argv[0], "snake"))   cmd_snake();
     else {
         vga_print_colored("\n  Unknown command: '", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
         vga_print_colored(argv[0], VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));

@@ -17,7 +17,7 @@ OBJCOPY="objcopy"
 
 # Compiler flags for freestanding 32-bit x86 kernel
 CFLAGS="-m32 -march=i686 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -mno-stack-arg-probe -mno-sse -mno-sse2 -mno-mmx -nostdlib -nostdinc -Wall -Wextra -Iinclude -O2 -c"
-LDFLAGS="-m i386pe -T linker.ld -nostdlib"
+LDFLAGS="-m i386pe -T linker.ld -nostdlib --section-alignment 16 --file-alignment 16"
 
 BUILD_DIR="build"
 IMG="$BUILD_DIR/ai_os.img"
@@ -51,6 +51,8 @@ $CC $CFLAGS drivers/keyboard.c -o "$BUILD_DIR/keyboard.o"
 $CC $CFLAGS drivers/timer.c    -o "$BUILD_DIR/timer.o"
 $CC $CFLAGS shell/shell.c      -o "$BUILD_DIR/shell.o"
 $CC $CFLAGS apps/editor.c      -o "$BUILD_DIR/editor.o"
+$CC $CFLAGS apps/snake.c       -o "$BUILD_DIR/snake.o"
+$CC $CFLAGS drivers/speaker.c  -o "$BUILD_DIR/speaker.o"
 
 # Step 4: Link kernel
 echo "[4/5] Linking kernel..."
@@ -67,6 +69,8 @@ $LD $LDFLAGS \
     "$BUILD_DIR/timer.o" \
     "$BUILD_DIR/shell.o" \
     "$BUILD_DIR/editor.o" \
+    "$BUILD_DIR/snake.o" \
+    "$BUILD_DIR/speaker.o" \
     -o "$BUILD_DIR/kernel.pe"
 
 # Convert PE to flat binary

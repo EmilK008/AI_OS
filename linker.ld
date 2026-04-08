@@ -8,9 +8,6 @@ SECTIONS
 
     .text ALIGN(16) : {
         *(.text)
-    }
-
-    .rodata ALIGN(16) : {
         *(.rodata*)
     }
 
