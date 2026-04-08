@@ -58,40 +58,40 @@ static int parse_args(char *input, char *argv[]) {
 
 /* ---- Built-in commands ---- */
 
+static void help_row(const char *left, const char *right) {
+    vga_print(left);
+    /* Pad to column 40 */
+    int len = str_len(left);
+    for (int i = len; i < 40; i++) vga_putchar(' ');
+    if (right) vga_print(right);
+    vga_putchar('\n');
+}
+
 static void cmd_help(void) {
-    vga_print_colored("\n=== AI_OS Commands ===\n", VGA_COLOR(VGA_YELLOW, VGA_BLACK));
-    vga_print_colored("\n  General:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
-    vga_print("    help          Show this help\n");
-    vga_print("    clear         Clear screen\n");
-    vga_print("    echo <msg>    Print message\n");
-    vga_print("    info          System information\n");
-    vga_print("    mem           Memory usage\n");
-    vga_print("    uptime        Show uptime\n");
-    vga_print("    color <0-F>   Change text color\n");
-    vga_print("    history       Show command history\n");
-    vga_print("    logo          Show AI_OS logo\n");
-    vga_print("    calc <expr>   Simple calculator\n");
-    vga_print("    matrix        Matrix rain effect\n");
-    vga_print("    sleep <sec>   Sleep for N seconds\n");
-    vga_print_colored("\n  Filesystem:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
-    vga_print("    ls            List files\n");
-    vga_print("    cd <dir>      Change directory\n");
-    vga_print("    pwd           Print working directory\n");
-    vga_print("    mkdir <name>  Create directory\n");
-    vga_print("    touch <file>  Create empty file\n");
-    vga_print("    cat <file>    Print file contents\n");
-    vga_print("    write <f> <t> Write text to file\n");
-    vga_print("    rm <name>     Delete file/empty dir\n");
-    vga_print("    edit <file>   Open text editor\n");
-    vga_print_colored("\n  Processes:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
-    vga_print("    ps            List processes\n");
-    vga_print("    kill <pid>    Kill process\n");
-    vga_print("    run <prog>    Run background program\n");
-    vga_print("                  (clock, counter, fib)\n");
-    vga_print_colored("\n  System:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
-    vga_print("    panic <type>  Test exception handler\n");
-    vga_print("    reboot        Reboot the system\n");
-    vga_print("    halt          Shutdown\n\n");
+    vga_print_colored(" === AI_OS Commands ===", VGA_COLOR(VGA_YELLOW, VGA_BLACK));
+    vga_print_colored("                    ", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
+    vga_print_colored("Type 'help <cmd>' for details\n", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
+    vga_print_colored(" General:                               ", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
+    vga_print_colored("Filesystem:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
+    help_row("  help        Show this help",            "  ls          List files");
+    help_row("  clear       Clear screen",              "  cd <dir>    Change directory");
+    help_row("  echo <msg>  Print message",             "  pwd         Working directory");
+    help_row("  info        System information",        "  mkdir <n>   Create directory");
+    help_row("  mem         Memory usage",              "  touch <f>   Create empty file");
+    help_row("  uptime      Show uptime",               "  cat <f>     Print file contents");
+    help_row("  color <0-F> Change text color",         "  write <f> t Write text to file");
+    help_row("  history     Command history",           "  rm <name>   Delete file/dir");
+    help_row("  calc <expr> Calculator (+ - * / %)",    "  edit <f>    Text editor");
+    help_row("  matrix      Matrix rain effect",        NULL);
+    help_row("  sleep <sec> Sleep N seconds",           NULL);
+    help_row("  logo        Show AI_OS logo",           NULL);
+    vga_print_colored(" Processes:                             ", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
+    vga_print_colored("System:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
+    help_row("  ps          List processes",            "  panic <t>   Test crash handler");
+    help_row("  kill <pid>  Kill process",              "  reboot      Reboot system");
+    help_row("  run <prog>  Background program",        "  halt        Shutdown");
+    vga_print_colored("              ", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
+    vga_print_colored("(clock, counter, fib)\n", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
 }
 
 static void cmd_info(void) {
