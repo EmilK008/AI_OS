@@ -11,6 +11,7 @@
 #include "terminal.h"
 #include "shell.h"
 #include "process.h"
+#include "appmenu.h"
 
 static struct window windows[MAX_WINDOWS];
 static int z_order[MAX_WINDOWS];
@@ -185,14 +186,23 @@ static bool in_content(struct window *win, int mx, int my) {
 
 void wm_handle_event(struct gui_event *evt) {
     if (evt->type == EVT_MOUSE_DOWN && evt->mouse_button == 0) {
+        /* Check if app menu item clicked */
+        if (appmenu_is_open()) {
+            int item = appmenu_hit_test(evt->mouse_x, evt->mouse_y);
+            if (item >= 0) {
+                appmenu_on_click(item);
+                return;
+            }
+            /* Click outside menu → close it */
+            appmenu_close();
+            /* Fall through to allow clicking on windows */
+        }
+
         /* Check if AI_OS button clicked (taskbar, x:2-56, bottom 26px) */
         int h = fb_get_height();
         if (evt->mouse_x >= 2 && evt->mouse_x <= 56 &&
             evt->mouse_y >= h - 26 && evt->mouse_y <= h - 4) {
-            if (!terminal_is_alive()) {
-                terminal_reopen();
-                process_create("shell", shell_entry);
-            }
+            appmenu_toggle();
             return;
         }
 
@@ -320,9 +330,12 @@ void wm_render_all(void) {
         btn_x += 124;
     }
 
-    /* 4. Mouse cursor */
+    /* 4. App menu (above taskbar, below cursor) */
+    appmenu_render();
+
+    /* 5. Mouse cursor */
     draw_cursor(mouse_get_x(), mouse_get_y());
 
-    /* 5. Flip */
+    /* 6. Flip */
     fb_flip();
 }

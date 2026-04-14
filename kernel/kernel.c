@@ -20,6 +20,8 @@
 #include "desktop.h"
 #include "terminal.h"
 #include "io.h"
+#include "snake_window.h"
+#include "filemgr.h"
 
 /* Minimal debug output via QEMU debug port (0xE9) */
 static void dbg_putc(char c) {
@@ -96,6 +98,8 @@ void kernel_main(void) {
 
             /* Render */
             terminal_render();
+            snake_window_render();
+            filemgr_render();
             wm_render_all();
 
             /* Yield CPU until next interrupt */

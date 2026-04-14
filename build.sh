@@ -58,12 +58,15 @@ $CC $CFLAGS drivers/mouse.c    -o "$BUILD_DIR/mouse.o"
 $CC $CFLAGS shell/shell.c      -o "$BUILD_DIR/shell.o"
 $CC $CFLAGS apps/editor.c      -o "$BUILD_DIR/editor.o"
 $CC $CFLAGS apps/snake.c       -o "$BUILD_DIR/snake.o"
+$CC $CFLAGS apps/snake_window.c -o "$BUILD_DIR/snake_window.o"
+$CC $CFLAGS apps/filemgr.c     -o "$BUILD_DIR/filemgr.o"
 # GUI
 $CC $CFLAGS gui/font_data.c    -o "$BUILD_DIR/font_data.o"
 $CC $CFLAGS gui/event.c        -o "$BUILD_DIR/event.o"
 $CC $CFLAGS gui/window.c       -o "$BUILD_DIR/window.o"
 $CC $CFLAGS gui/desktop.c      -o "$BUILD_DIR/desktop.o"
 $CC $CFLAGS gui/terminal.c     -o "$BUILD_DIR/terminal.o"
+$CC $CFLAGS gui/appmenu.c      -o "$BUILD_DIR/appmenu.o"
 
 # Step 4: Link kernel
 echo "[4/5] Linking kernel..."
@@ -81,6 +84,8 @@ $LD $LDFLAGS \
     "$BUILD_DIR/shell.o" \
     "$BUILD_DIR/editor.o" \
     "$BUILD_DIR/snake.o" \
+    "$BUILD_DIR/snake_window.o" \
+    "$BUILD_DIR/filemgr.o" \
     "$BUILD_DIR/speaker.o" \
     "$BUILD_DIR/framebuffer.o" \
     "$BUILD_DIR/mouse.o" \
@@ -89,6 +94,7 @@ $LD $LDFLAGS \
     "$BUILD_DIR/window.o" \
     "$BUILD_DIR/desktop.o" \
     "$BUILD_DIR/terminal.o" \
+    "$BUILD_DIR/appmenu.o" \
     -o "$BUILD_DIR/kernel.pe"
 
 # Convert PE to flat binary
