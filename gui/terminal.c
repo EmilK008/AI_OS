@@ -112,6 +112,28 @@ void terminal_set_color_redirect(uint8_t color) {
     term_current_color = color;
 }
 
+void terminal_putchar_at_redirect(int x, int y, char c, uint8_t color) {
+    if (x >= 0 && x < TERM_COLS && y >= 0 && y < TERM_ROWS) {
+        term_chars[y][x] = c;
+        term_colors[y][x] = color;
+    }
+}
+
+void terminal_set_cursor_redirect(int x, int y) {
+    term_cx = x;
+    term_cy = y;
+}
+
+bool terminal_is_alive(void) {
+    if (term_window_id < 0) return false;
+    struct window *win = wm_get_window(term_window_id);
+    return (win && win->alive);
+}
+
+void terminal_reopen(void) {
+    terminal_create();
+}
+
 void terminal_render(void) {
     struct window *win = wm_get_window(term_window_id);
     if (!win || !win->content) return;

@@ -201,16 +201,15 @@ static void cmd_logo(void) {
 
 static void cmd_matrix(void) {
     vga_print_colored("\n  Matrix rain for 3 seconds...\n", VGA_COLOR(VGA_GREEN, VGA_BLACK));
-    uint16_t *vga = (uint16_t*)0xB8000;
+    vga_clear();
     uint32_t seed = timer_get_ticks();
     uint32_t start = timer_get_ticks();
     while (timer_get_ticks() - start < 300) {
         seed = seed * 1103515245 + 12345;
-        int x = (seed >> 16) % 80;
-        int y = (seed >> 8) % 25;
+        int x = (seed >> 16) % 78;
+        int y = (seed >> 8) % 24;
         char c = '!' + (seed % 94);
-        uint16_t entry = (uint16_t)(VGA_COLOR(VGA_GREEN, VGA_BLACK)) << 8 | c;
-        vga[y * 80 + x] = entry;
+        vga_putchar_at(x, y, c, VGA_COLOR(VGA_GREEN, VGA_BLACK));
         for (volatile int d = 0; d < 50000; d++);
     }
     vga_clear();

@@ -132,12 +132,14 @@ int vga_get_cursor_x(void) { return cursor_x; }
 int vga_get_cursor_y(void) { return cursor_y; }
 
 void vga_putchar_at(int x, int y, char c, uint8_t color) {
+    if (gui_mode) { terminal_putchar_at_redirect(x, y, c, color); return; }
     if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
         VGA_MEMORY[y * VGA_WIDTH + x] = (uint16_t)color << 8 | (uint16_t)c;
     }
 }
 
 void vga_set_cursor_pos(int x, int y) {
+    if (gui_mode) { terminal_set_cursor_redirect(x, y); return; }
     cursor_x = x;
     cursor_y = y;
     update_hw_cursor();

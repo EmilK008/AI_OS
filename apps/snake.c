@@ -7,8 +7,6 @@
 #include "keyboard.h"
 #include "timer.h"
 #include "speaker.h"
-#include "string.h"
-#include "io.h"
 
 /* Game area (inside border) */
 #define BOARD_X      1
@@ -45,12 +43,8 @@ static bool game_over;
 static bool game_quit;
 static uint32_t rng_state;
 
-static uint16_t *vga = (uint16_t *)0xB8000;
-
 static void put(int x, int y, char c, uint8_t color) {
-    if (x >= 0 && x < 80 && y >= 0 && y < 25) {
-        vga[y * 80 + x] = (uint16_t)color << 8 | (uint8_t)c;
-    }
+    vga_putchar_at(x, y, c, color);
 }
 
 static uint32_t rng(void) {
@@ -160,17 +154,12 @@ static void sound_start(void) {
 }
 
 static void game_init(void) {
-    /* Clear screen */
-    for (int i = 0; i < 80 * 25; i++) {
-        vga[i] = (uint16_t)VGA_COLOR(VGA_LIGHT_GREY, VGA_BLACK) << 8 | ' ';
-    }
+    /* Clear screen via VGA abstraction */
+    vga_set_color(VGA_COLOR(VGA_LIGHT_GREY, VGA_BLACK));
+    vga_clear();
 
     /* Hide cursor off-screen */
-    uint16_t cpos = 25 * 80;
-    outb(0x3D4, 0x0F);
-    outb(0x3D5, (uint8_t)(cpos & 0xFF));
-    outb(0x3D4, 0x0E);
-    outb(0x3D5, (uint8_t)((cpos >> 8) & 0xFF));
+    vga_set_cursor_pos(80, 25);
 
     score = 0;
     game_over = false;
