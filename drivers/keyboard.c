@@ -6,6 +6,7 @@
 #include "io.h"
 #include "vga.h"
 #include "shell.h"
+#include "event.h"
 
 #define KEYBOARD_DATA_PORT 0x60
 #define KEYBOARD_STATUS_PORT 0x64
@@ -44,6 +45,7 @@ static volatile bool shift_pressed = false;
 static volatile bool caps_lock = false;
 static volatile bool ctrl_pressed = false;
 static volatile bool extended_key = false;
+static volatile bool gui_mode_active = false;
 
 static void buffer_put(uint8_t c) {
     int next = (buf_head + 1) % KEY_BUFFER_SIZE;
@@ -67,17 +69,31 @@ void keyboard_handler(void) {
     if (extended_key) {
         extended_key = false;
         if (!(scancode & 0x80)) {
+            uint8_t key = 0;
             /* Extended key press */
             switch (scancode) {
-                case 0x48: buffer_put(KEY_UP);    break;
-                case 0x50: buffer_put(KEY_DOWN);  break;
-                case 0x4B: buffer_put(KEY_LEFT);  break;
-                case 0x4D: buffer_put(KEY_RIGHT); break;
-                case 0x47: buffer_put(KEY_HOME);  break;
-                case 0x4F: buffer_put(KEY_END);   break;
-                case 0x53: buffer_put(KEY_DELETE); break;
-                case 0x49: buffer_put(KEY_PGUP);  break;
-                case 0x51: buffer_put(KEY_PGDN);  break;
+                case 0x48: key = KEY_UP;    break;
+                case 0x50: key = KEY_DOWN;  break;
+                case 0x4B: key = KEY_LEFT;  break;
+                case 0x4D: key = KEY_RIGHT; break;
+                case 0x47: key = KEY_HOME;  break;
+                case 0x4F: key = KEY_END;   break;
+                case 0x53: key = KEY_DELETE; break;
+                case 0x49: key = KEY_PGUP;  break;
+                case 0x51: key = KEY_PGDN;  break;
+            }
+            if (key) {
+                if (gui_mode_active) {
+                    struct gui_event evt;
+                    evt.type = EVT_KEY_PRESS;
+                    evt.key = key;
+                    evt.mouse_x = 0;
+                    evt.mouse_y = 0;
+                    evt.mouse_button = 0;
+                    event_push(&evt);
+                } else {
+                    buffer_put(key);
+                }
             }
         }
         outb(0x20, 0x20);
@@ -118,7 +134,17 @@ void keyboard_handler(void) {
             }
 
             if (c != 0) {
-                buffer_put((uint8_t)c);
+                if (gui_mode_active) {
+                    struct gui_event evt;
+                    evt.type = EVT_KEY_PRESS;
+                    evt.key = (uint8_t)c;
+                    evt.mouse_x = 0;
+                    evt.mouse_y = 0;
+                    evt.mouse_button = 0;
+                    event_push(&evt);
+                } else {
+                    buffer_put((uint8_t)c);
+                }
             }
         }
     }
@@ -142,4 +168,12 @@ char keyboard_getchar(void) {
 
 void keyboard_init(void) {
     /* Keyboard is enabled via PIC in idt_init */
+}
+
+void keyboard_set_gui_mode(bool enabled) {
+    gui_mode_active = enabled;
+}
+
+void keyboard_inject_char(uint8_t c) {
+    buffer_put(c);
 }

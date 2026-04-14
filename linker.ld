@@ -9,6 +9,7 @@ SECTIONS
     .text ALIGN(16) : {
         *(.text)
         *(.rodata*)
+        *(.rdata*)
     }
 
     .data ALIGN(16) : {

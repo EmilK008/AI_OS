@@ -678,7 +678,7 @@ static void cmd_snake(void) {
 
 /* ---- Command dispatcher ---- */
 
-static void execute_command(char *input) {
+void shell_execute(char *input) {
     char *argv[MAX_ARGS];
     int argc = parse_args(input, argv);
 
@@ -754,7 +754,7 @@ void shell_run(void) {
                     }
                     str_copy(history[HISTORY_SIZE - 1], cmd_buffer);
                 }
-                execute_command(cmd_buffer);
+                shell_execute(cmd_buffer);
             }
 
             cmd_pos = 0;
@@ -816,4 +816,9 @@ void shell_run(void) {
             }
         }
     }
+}
+
+void shell_entry(void) {
+    shell_init();
+    shell_run();
 }

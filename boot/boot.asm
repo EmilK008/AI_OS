@@ -1,16 +1,15 @@
 ; ============================================================================
 ; AI_OS Bootloader (512-byte MBR)
-; Loads kernel, sets up GDT, enters 32-bit protected mode, jumps to kernel
+; Loads kernel via CHS disk reads, enters 32-bit protected mode
+; Graphics mode is set by the kernel using Bochs VGA adapter ports
 ; ============================================================================
 
 [BITS 16]
 [ORG 0x7C00]
 
-KERNEL_LOAD_SEG   equ 0x1000       ; load at 0x1000:0 = physical 0x10000
-KERNEL_SECTORS    equ 128          ; 128 sectors = 64KB max kernel
 KERNEL_OFFSET     equ 0x10000
+KERNEL_SECTORS    equ 255
 
-; --- 16-bit entry ---
 start:
     cli
     xor  ax, ax
@@ -21,31 +20,60 @@ start:
     sti
     mov  [boot_drive], dl
 
-    ; Load kernel sectors from disk (two reads for safety)
-    ; Read first 64 sectors
-    mov  bx, KERNEL_LOAD_SEG
+    ; ---- Load kernel using CHS reads ----
+    ; Floppy geometry: 18 sectors/track, 2 heads
+    ; Read sectors LBA 1..255 to physical 0x10000+
+
+    mov  word [cur_lba], 1
+    mov  word [sectors_left], KERNEL_SECTORS
+    mov  word [load_seg], 0x1000
+
+.read_loop:
+    cmp  word [sectors_left], 0
+    je   .read_done
+
+    ; Convert LBA to CHS
+    mov  ax, [cur_lba]
+    xor  dx, dx
+    mov  bx, 18
+    div  bx              ; AX = LBA/18, DX = LBA%18
+    mov  cl, dl
+    inc  cl              ; CL = sector (1-based)
+    xor  dx, dx
+    mov  bx, 2
+    div  bx              ; AX = cylinder, DX = head
+    mov  ch, al          ; CH = cylinder
+    mov  dh, dl          ; DH = head
+
+    ; Sectors remaining in this track
+    mov  al, 19
+    sub  al, cl
+    cmp  al, [sectors_left]
+    jbe  .count_ok
+    mov  al, [sectors_left]
+.count_ok:
+    mov  [cur_count], al
+
+    ; Read sectors
+    mov  ah, 0x02
+    mov  dl, [boot_drive]
+    mov  bx, [load_seg]
     mov  es, bx
     xor  bx, bx
-    mov  ah, 0x02
-    mov  al, 64
-    mov  ch, 0
-    mov  cl, 2              ; start at sector 2
-    mov  dh, 0
-    mov  dl, [boot_drive]
     int  0x13
-    jc   .err
+    jc   .read_done
 
-    ; Read next 64 sectors to 0x1000:0x8000 = physical 0x18000
-    mov  bx, 0x8000
-    mov  ah, 0x02
-    mov  al, 64
-    mov  ch, 0
-    mov  cl, 66             ; sector 66
-    mov  dh, 0
-    mov  dl, [boot_drive]
-    int  0x13
-    ; If second read fails, continue anyway (kernel might be small)
+    ; Advance
+    xor  ah, ah
+    mov  al, [cur_count]
+    add  [cur_lba], ax
+    sub  [sectors_left], ax
+    shl  ax, 5           ; count * 32 paragraphs
+    add  [load_seg], ax
 
+    jmp  .read_loop
+
+.read_done:
     ; Enable A20
     mov  ax, 0x2401
     int  0x15
@@ -68,26 +96,31 @@ start:
     cli
     hlt
 
-; --- 32-bit protected mode entry (still inside boot sector) ---
+; --- 32-bit protected mode entry ---
 [BITS 32]
 pm_entry:
-    mov  ax, 0x10           ; data segment selector
+    mov  ax, 0x10
     mov  ds, ax
     mov  es, ax
     mov  fs, ax
     mov  gs, ax
     mov  ss, ax
     mov  esp, 0x90000
-    jmp  KERNEL_OFFSET      ; jump to kernel!
+    jmp  KERNEL_OFFSET
+
+; --- Data ---
+[BITS 16]
+boot_drive:   db 0
+cur_lba:      dw 0
+sectors_left: dw 0
+load_seg:     dw 0
+cur_count:    db 0
 
 ; --- GDT ---
-[BITS 16]
 gdt_start:
     dq 0
-    ; code segment
     dw 0xFFFF, 0x0000
     db 0x00, 10011010b, 11001111b, 0x00
-    ; data segment
     dw 0xFFFF, 0x0000
     db 0x00, 10010010b, 11001111b, 0x00
 gdt_end:
@@ -95,8 +128,6 @@ gdt_end:
 gdt_desc:
     dw gdt_end - gdt_start - 1
     dd gdt_start
-
-boot_drive: db 0
 
 ; --- Pad to 510 bytes + boot signature ---
 times 510 - ($ - $$) db 0

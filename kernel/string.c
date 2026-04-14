@@ -71,3 +71,13 @@ int str_to_int(const char *s) {
     }
     return neg ? -result : result;
 }
+
+void mem_copy_fast(void *dest, const void *src, uint32_t count) {
+    uint32_t dwords = count >> 2;
+    __asm__ __volatile__(
+        "rep movsl"
+        : "+D"(dest), "+S"(src), "+c"(dwords)
+        :
+        : "memory"
+    );
+}

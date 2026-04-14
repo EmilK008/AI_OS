@@ -37,5 +37,6 @@ int  vga_get_cursor_x(void);
 int  vga_get_cursor_y(void);
 void vga_putchar_at(int x, int y, char c, uint8_t color);
 void vga_set_cursor_pos(int x, int y);
+void vga_set_gui_mode(bool enabled);
 
 #endif

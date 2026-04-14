@@ -4,6 +4,7 @@
  * =========================================================================== */
 #include "vga.h"
 #include "io.h"
+#include "terminal.h"
 
 #define VGA_MEMORY  ((uint16_t*)0xB8000)
 #define VGA_WIDTH   80
@@ -12,6 +13,9 @@
 static int cursor_x = 0;
 static int cursor_y = 0;
 static uint8_t current_color = VGA_COLOR(VGA_LIGHT_GREY, VGA_BLACK);
+static bool gui_mode = false;
+
+void vga_set_gui_mode(bool enabled) { gui_mode = enabled; }
 
 static void update_hw_cursor(void) {
     uint16_t pos = cursor_y * VGA_WIDTH + cursor_x;
@@ -40,6 +44,7 @@ void vga_init(void) {
 }
 
 void vga_clear(void) {
+    if (gui_mode) { terminal_clear_redirect(); return; }
     uint16_t blank = (uint16_t)current_color << 8 | ' ';
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
         VGA_MEMORY[i] = blank;
@@ -50,10 +55,12 @@ void vga_clear(void) {
 }
 
 void vga_set_color(uint8_t color) {
+    if (gui_mode) { terminal_set_color_redirect(color); }
     current_color = color;
 }
 
 void vga_putchar(char c) {
+    if (gui_mode) { terminal_putchar_redirect(c); return; }
     if (c == '\n') {
         cursor_x = 0;
         cursor_y++;

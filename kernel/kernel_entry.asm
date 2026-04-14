@@ -54,9 +54,10 @@ _exception_common:
     pushad
     push esp              ; pointer to exception frame
     call _exception_handler
-    ; Should never return, but just in case:
-    cli
-    hlt
+    add  esp, 4           ; pop argument
+    popad
+    add  esp, 8           ; pop error code + interrupt number
+    iretd
 
 ; Generate exception stubs
 ISR_NOERRCODE 0    ; Divide by zero
@@ -131,3 +132,42 @@ _inb:
     mov  dx, [esp + 4]
     in   al, dx
     ret
+
+[GLOBAL _outw]
+_outw:
+    mov  ax, [esp + 8]
+    mov  dx, [esp + 4]
+    out  dx, ax
+    ret
+
+[GLOBAL _inw]
+_inw:
+    xor  eax, eax
+    mov  dx, [esp + 4]
+    in   ax, dx
+    ret
+
+[GLOBAL _outl]
+_outl:
+    mov  eax, [esp + 8]
+    mov  dx, [esp + 4]
+    out  dx, eax
+    ret
+
+[GLOBAL _inl]
+_inl:
+    mov  dx, [esp + 4]
+    in   eax, dx
+    ret
+
+; ============================================================================
+; Mouse ISR stub (IRQ12 = vector 44)
+; ============================================================================
+[GLOBAL _isr_stub_mouse]
+[EXTERN _mouse_handler]
+
+_isr_stub_mouse:
+    pushad
+    call _mouse_handler
+    popad
+    iretd

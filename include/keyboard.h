@@ -18,5 +18,7 @@ void keyboard_init(void);
 void keyboard_handler(void);
 bool keyboard_has_key(void);
 char keyboard_getchar(void);
+void keyboard_set_gui_mode(bool enabled);
+void keyboard_inject_char(uint8_t c);
 
 #endif

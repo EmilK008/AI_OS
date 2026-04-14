@@ -5,6 +5,7 @@
 #include "idt.h"
 #include "io.h"
 #include "vga.h"
+#include "string.h"
 
 #define IDT_ENTRIES 256
 
@@ -35,6 +36,7 @@ static struct idt_ptr   idtp;
 extern void idt_load(struct idt_ptr *ptr);
 extern void isr_stub_keyboard(void);
 extern void isr_stub_timer(void);
+extern void isr_stub_mouse(void);
 
 /* Exception ISR stubs (from kernel_entry.asm) */
 extern void isr_stub_exc_0(void);
@@ -58,87 +60,43 @@ extern void isr_stub_exc_17(void);
 extern void isr_stub_exc_18(void);
 extern void isr_stub_exc_19(void);
 
-static const char *exception_names[] = {
-    "Divide By Zero",
-    "Debug",
-    "Non-Maskable Interrupt",
-    "Breakpoint",
-    "Overflow",
-    "Bound Range Exceeded",
-    "Invalid Opcode",
-    "Device Not Available",
-    "Double Fault",
-    "Coprocessor Segment Overrun",
-    "Invalid TSS",
-    "Segment Not Present",
-    "Stack-Segment Fault",
-    "General Protection Fault",
-    "Page Fault",
-    "Reserved",
-    "x87 FP Exception",
-    "Alignment Check",
-    "Machine Check",
-    "SIMD FP Exception",
-};
+/* Debug output via QEMU debug port 0xE9 */
+static void exc_dbg_putc(char c) {
+    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)c), "Nd"((uint16_t)0xE9));
+}
+static void exc_dbg_print(const char *s) {
+    while (*s) exc_dbg_putc(*s++);
+}
+static char hex_digit(uint8_t v) {
+    v &= 0xF;
+    return (v < 10) ? (char)('0' + v) : (char)('A' + v - 10);
+}
+static void exc_dbg_hex(uint32_t n) {
+    exc_dbg_putc('0');
+    exc_dbg_putc('x');
+    for (int i = 28; i >= 0; i -= 4)
+        exc_dbg_putc(hex_digit((uint8_t)(n >> i)));
+}
 
 /* C exception handler called from assembly */
 void exception_handler(struct exception_frame *frame) {
-    uint8_t err_color = VGA_COLOR(VGA_WHITE, VGA_RED);
-    uint8_t info_color = VGA_COLOR(VGA_YELLOW, VGA_RED);
+    /* Debug (#1) and breakpoint (#3) are non-fatal — just return */
+    if (frame->int_no == 1 || frame->int_no == 3) return;
 
-    vga_clear();
+    /* Fatal exception: minimal debug output then hard freeze */
+    exc_dbg_print("\n!EXC ");
+    /* Print int_no as 2 decimal digits */
+    exc_dbg_putc('0' + (char)(frame->int_no / 10));
+    exc_dbg_putc('0' + (char)(frame->int_no % 10));
+    exc_dbg_print(" e=");
+    exc_dbg_hex(frame->err_code);
+    exc_dbg_print(" @");
+    exc_dbg_hex(frame->eip);
+    exc_dbg_print("\n");
 
-    /* Draw red banner */
-    vga_print_colored("\n", err_color);
-    vga_print_colored("  ====================================================\n", err_color);
-    vga_print_colored("    KERNEL PANIC - CPU EXCEPTION                      \n", err_color);
-    vga_print_colored("  ====================================================\n", err_color);
-
-    vga_print_colored("\n  Exception: ", info_color);
-    if (frame->int_no < 20) {
-        vga_print_colored(exception_names[frame->int_no], err_color);
-    } else {
-        vga_print_colored("Unknown", err_color);
-    }
-    vga_print_colored(" (#", info_color);
-    vga_print_dec(frame->int_no);
-    vga_print_colored(")\n", info_color);
-
-    vga_print("\n  Error Code: ");
-    vga_print_hex(frame->err_code);
-    vga_print("\n  EIP:        ");
-    vga_print_hex(frame->eip);
-    vga_print("\n  CS:         ");
-    vga_print_hex(frame->cs);
-    vga_print("\n  EFLAGS:     ");
-    vga_print_hex(frame->eflags);
-
-    vga_print("\n\n  Registers:\n");
-    vga_print("    EAX="); vga_print_hex(frame->eax);
-    vga_print("  EBX="); vga_print_hex(frame->ebx);
-    vga_print("\n    ECX="); vga_print_hex(frame->ecx);
-    vga_print("  EDX="); vga_print_hex(frame->edx);
-    vga_print("\n    ESI="); vga_print_hex(frame->esi);
-    vga_print("  EDI="); vga_print_hex(frame->edi);
-    vga_print("\n    EBP="); vga_print_hex(frame->ebp);
-    vga_print("  ESP="); vga_print_hex(frame->esp);
-
-    if (frame->int_no == 14) {
-        /* Page fault: CR2 contains the faulting address */
-        uint32_t cr2;
-        __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
-        vga_print("\n\n  Page Fault Address (CR2): ");
-        vga_print_hex(cr2);
-        if (frame->err_code & 1) vga_print(" [protection violation]");
-        else vga_print(" [page not present]");
-        if (frame->err_code & 2) vga_print(" [write]");
-        else vga_print(" [read]");
-    }
-
-    vga_print_colored("\n\n  System halted. Press reset to reboot.\n",
-                      VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
-
-    __asm__ __volatile__("cli; hlt");
+    /* Hard freeze — infinite loop, NOT hlt (NMI can wake hlt) */
+    __asm__ __volatile__("cli");
+    for (;;) __asm__ __volatile__("hlt");
 }
 
 static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
@@ -151,23 +109,21 @@ static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags
 
 /* Remap PIC to IRQ 32-47 (away from CPU exceptions 0-31) */
 static void pic_remap(void) {
-    outb(0x20, 0x11);  io_wait();
-    outb(0xA0, 0x11);  io_wait();
-    outb(0x21, 0x20);  io_wait();
-    outb(0xA1, 0x28);  io_wait();
-    outb(0x21, 0x04);  io_wait();
-    outb(0xA1, 0x02);  io_wait();
-    outb(0x21, 0x01);  io_wait();
-    outb(0xA1, 0x01);  io_wait();
+    outb(0x20, 0x11);
+    outb(0xA0, 0x11);
+    outb(0x21, 0x20);
+    outb(0xA1, 0x28);
+    outb(0x21, 0x04);
+    outb(0xA1, 0x02);
+    outb(0x21, 0x01);
+    outb(0xA1, 0x01);
 
-    outb(0x21, 0xFC);  /* Master: unmask IRQ0 and IRQ1 */
-    outb(0xA1, 0xFF);  /* Slave: mask all */
+    outb(0x21, 0xF8);  /* Master: unmask IRQ0, IRQ1, IRQ2 (cascade) */
+    outb(0xA1, 0xEF);  /* Slave: unmask IRQ12 (mouse) */
 }
 
 void idt_init(void) {
-    for (int i = 0; i < IDT_ENTRIES; i++) {
-        idt_set_gate(i, 0, 0, 0);
-    }
+    mem_set(idt, 0, sizeof(idt));
 
     pic_remap();
 
@@ -196,10 +152,13 @@ void idt_init(void) {
     /* Hardware interrupts */
     idt_set_gate(32, (uint32_t)isr_stub_timer,    0x08, 0x8E);
     idt_set_gate(33, (uint32_t)isr_stub_keyboard,  0x08, 0x8E);
+    idt_set_gate(44, (uint32_t)isr_stub_mouse,     0x08, 0x8E);
 
     idtp.limit = sizeof(idt) - 1;
     idtp.base  = (uint32_t)&idt;
     idt_load(&idtp);
 
-    __asm__ __volatile__("sti");
+    /* NOTE: Interrupts are NOT enabled here.
+     * The caller must issue 'sti' after all subsystems
+     * (especially process_init) are ready for IRQs. */
 }

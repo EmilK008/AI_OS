@@ -23,7 +23,7 @@ BUILD_DIR="build"
 IMG="$BUILD_DIR/ai_os.img"
 
 echo "========================================"
-echo "  AI_OS Build System v0.2"
+echo "  AI_OS Build System v0.3 (GUI)"
 echo "========================================"
 
 # Create build directory
@@ -40,19 +40,30 @@ $NASM -f elf32 kernel/kernel_entry.asm -o "$BUILD_DIR/kernel_entry.o"
 
 # Step 3: Compile C sources
 echo "[3/5] Compiling kernel..."
+# Core
 $CC $CFLAGS kernel/kernel.c    -o "$BUILD_DIR/kernel.o"
 $CC $CFLAGS kernel/idt.c       -o "$BUILD_DIR/idt.o"
 $CC $CFLAGS kernel/memory.c    -o "$BUILD_DIR/memory.o"
 $CC $CFLAGS kernel/string.c    -o "$BUILD_DIR/string.o"
 $CC $CFLAGS kernel/process.c   -o "$BUILD_DIR/process.o"
 $CC $CFLAGS kernel/fs.c        -o "$BUILD_DIR/fs.o"
+# Drivers
 $CC $CFLAGS drivers/vga.c      -o "$BUILD_DIR/vga.o"
 $CC $CFLAGS drivers/keyboard.c -o "$BUILD_DIR/keyboard.o"
 $CC $CFLAGS drivers/timer.c    -o "$BUILD_DIR/timer.o"
+$CC $CFLAGS drivers/speaker.c  -o "$BUILD_DIR/speaker.o"
+$CC $CFLAGS drivers/framebuffer.c -o "$BUILD_DIR/framebuffer.o"
+$CC $CFLAGS drivers/mouse.c    -o "$BUILD_DIR/mouse.o"
+# Shell & Apps
 $CC $CFLAGS shell/shell.c      -o "$BUILD_DIR/shell.o"
 $CC $CFLAGS apps/editor.c      -o "$BUILD_DIR/editor.o"
 $CC $CFLAGS apps/snake.c       -o "$BUILD_DIR/snake.o"
-$CC $CFLAGS drivers/speaker.c  -o "$BUILD_DIR/speaker.o"
+# GUI
+$CC $CFLAGS gui/font_data.c    -o "$BUILD_DIR/font_data.o"
+$CC $CFLAGS gui/event.c        -o "$BUILD_DIR/event.o"
+$CC $CFLAGS gui/window.c       -o "$BUILD_DIR/window.o"
+$CC $CFLAGS gui/desktop.c      -o "$BUILD_DIR/desktop.o"
+$CC $CFLAGS gui/terminal.c     -o "$BUILD_DIR/terminal.o"
 
 # Step 4: Link kernel
 echo "[4/5] Linking kernel..."
@@ -71,6 +82,13 @@ $LD $LDFLAGS \
     "$BUILD_DIR/editor.o" \
     "$BUILD_DIR/snake.o" \
     "$BUILD_DIR/speaker.o" \
+    "$BUILD_DIR/framebuffer.o" \
+    "$BUILD_DIR/mouse.o" \
+    "$BUILD_DIR/font_data.o" \
+    "$BUILD_DIR/event.o" \
+    "$BUILD_DIR/window.o" \
+    "$BUILD_DIR/desktop.o" \
+    "$BUILD_DIR/terminal.o" \
     -o "$BUILD_DIR/kernel.pe"
 
 # Convert PE to flat binary
@@ -82,16 +100,16 @@ echo "      kernel.bin: $(wc -c < "$BUILD_DIR/kernel.bin") bytes"
 echo "[5/5] Creating disk image..."
 cat "$BUILD_DIR/boot.bin" "$BUILD_DIR/kernel.bin" > "$BUILD_DIR/ai_os.img"
 
-# Pad to at least 128 sectors (64KB) so bootloader reads enough
+# Pad to 1.44MB floppy disk size (required for correct CHS geometry in QEMU)
 IMGSIZE=$(wc -c < "$BUILD_DIR/ai_os.img")
-PADSIZE=$((128 * 512))
-if [ "$IMGSIZE" -lt "$PADSIZE" ]; then
-    dd if=/dev/zero bs=1 count=$(($PADSIZE - $IMGSIZE)) >> "$BUILD_DIR/ai_os.img" 2>/dev/null
+FLOPPYSIZE=1474560
+if [ "$IMGSIZE" -lt "$FLOPPYSIZE" ]; then
+    dd if=/dev/zero bs=1 count=$(($FLOPPYSIZE - $IMGSIZE)) >> "$BUILD_DIR/ai_os.img" 2>/dev/null
 fi
 
 echo "      ai_os.img: $(wc -c < "$BUILD_DIR/ai_os.img") bytes"
 echo ""
 echo "========================================"
 echo "  Build complete!"
-echo "  Run: qemu-system-i386 -fda build/ai_os.img"
+echo "  Run: qemu-system-i386 -fda build/ai_os.img -vga std -m 128"
 echo "========================================"

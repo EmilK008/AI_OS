@@ -5,7 +5,7 @@
 #include "memory.h"
 
 #define HEAP_START 0x200000   /* 2 MB mark */
-#define HEAP_SIZE  0x100000   /* 1 MB heap */
+#define HEAP_SIZE  0x400000   /* 4 MB heap */
 #define HEAP_END   (HEAP_START + HEAP_SIZE)
 #define BLOCK_SIZE 64         /* Minimum allocation unit */
 

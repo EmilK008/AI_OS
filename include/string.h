@@ -12,5 +12,6 @@ int   str_cmp(const char *a, const char *b);
 void *mem_set(void *dest, int val, uint32_t count);
 void *mem_copy(void *dest, const void *src, uint32_t count);
 int   str_to_int(const char *s);
+void  mem_copy_fast(void *dest, const void *src, uint32_t count);
 
 #endif
