@@ -5,7 +5,7 @@
 #include "memory.h"
 
 #define HEAP_START 0x200000   /* 2 MB mark */
-#define HEAP_SIZE  0x400000   /* 4 MB heap */
+#define HEAP_SIZE  0x800000   /* 8 MB heap */
 #define HEAP_END   (HEAP_START + HEAP_SIZE)
 #define BLOCK_SIZE 64         /* Minimum allocation unit */
 
@@ -19,6 +19,17 @@ struct mem_block {
 #define MEM_MAGIC_USED 0xDEADBEEF
 #define MEM_MAGIC_FREE 0xFEEDFACE
 
+/* Debug output via QEMU port 0xE9 */
+static void m_putc(char c) {
+    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)c), "Nd"((uint16_t)0xE9));
+}
+static void m_print(const char *s) { while (*s) m_putc(*s++); }
+static void m_hex(uint32_t v) {
+    static const char hx[] = "0123456789ABCDEF";
+    m_putc('0'); m_putc('x');
+    for (int i = 28; i >= 0; i -= 4) m_putc(hx[(v >> i) & 0xF]);
+}
+
 static struct mem_block *free_list = NULL;
 static uint32_t total_memory = HEAP_SIZE;
 static uint32_t used_memory = 0;
@@ -30,6 +41,10 @@ void memory_init(void) {
     free_list->magic = MEM_MAGIC_FREE;
     free_list->next = NULL;
     used_memory = 0;
+    m_print("HEAP: start="); m_hex(HEAP_START);
+    m_print(" size="); m_hex(HEAP_SIZE);
+    m_print(" end="); m_hex(HEAP_END);
+    m_putc('\n');
 }
 
 void *kmalloc(uint32_t size) {
@@ -40,6 +55,16 @@ void *kmalloc(uint32_t size) {
 
     struct mem_block *prev = NULL;
     struct mem_block *curr = free_list;
+
+    /* Debug: count free blocks and total free */
+    uint32_t free_total = 0, largest = 0, block_count = 0;
+    struct mem_block *scan = free_list;
+    while (scan) {
+        free_total += scan->size;
+        if (scan->size > largest) largest = scan->size;
+        block_count++;
+        scan = scan->next;
+    }
 
     while (curr) {
         if (curr->size >= size) {
@@ -64,12 +89,22 @@ void *kmalloc(uint32_t size) {
             curr->magic = MEM_MAGIC_USED;
             curr->next = NULL;
             used_memory += curr->size;
+            if (curr->size > 0x10000) {
+                m_print("ALLOC big: "); m_hex(curr->size);
+                m_print(" used="); m_hex(used_memory);
+                m_putc('\n');
+            }
             return (void *)((uint8_t *)curr + sizeof(struct mem_block));
         }
         prev = curr;
         curr = curr->next;
     }
 
+    m_print("KMALLOC FAIL: need="); m_hex(size);
+    m_print(" free_total="); m_hex(free_total);
+    m_print(" largest="); m_hex(largest);
+    m_print(" blocks="); m_hex(block_count);
+    m_putc('\n');
     return NULL; /* Out of memory */
 }
 

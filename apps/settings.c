@@ -11,6 +11,8 @@
 #include "memory.h"
 #include "string.h"
 #include "timer.h"
+#include "fs.h"
+#include "keyboard.h"
 
 #define SET_W        340
 #define SET_H        280
@@ -19,6 +21,10 @@
 #define TAB_COUNT    4
 #define PANEL_X      (SIDEBAR_W + 2)
 #define PANEL_W      (SET_W - SIDEBAR_W - 2)
+
+/* Modes */
+#define MODE_NORMAL    0
+#define MODE_PICK_WP   1
 
 /* Color scheme */
 #define C_BG         COLOR_RGB(30, 30, 38)
@@ -60,6 +66,29 @@ static const color_t bg_palette[BG_COLORS] = {
 
 static int win_id = -1;
 static int current_tab = 0;
+static int mode = MODE_NORMAL;
+
+/* File picker state for wallpaper */
+static int  picker_entries[MAX_CHILDREN];
+static int  picker_count = 0;
+static int  picker_sel = 0;
+static int  picker_scroll = 0;
+#define PICKER_VISIBLE 8
+
+static void picker_refresh(void) {
+    picker_count = 0;
+    picker_sel = 0;
+    picker_scroll = 0;
+    int cwd = fs_get_cwd();
+    struct fs_node *dir = fs_get_node(cwd);
+    if (!dir) return;
+    for (int i = 0; i < dir->child_count && picker_count < MAX_CHILDREN; i++) {
+        int ci = dir->children[i];
+        struct fs_node *child = fs_get_node(ci);
+        if (child && child->used && child->type == FS_FILE)
+            picker_entries[picker_count++] = ci;
+    }
+}
 
 /* --- Drawing helpers --- */
 
@@ -89,7 +118,6 @@ static void set_text(color_t *buf, int cw, int ch, int px, int py,
     }
 }
 
-/* Draw text without bg fill (transparent) */
 static void set_text_nobg(color_t *buf, int cw, int ch, int px, int py,
                            const char *s, color_t fg) {
     while (*s) {
@@ -108,7 +136,6 @@ static void set_text_nobg(color_t *buf, int cw, int ch, int px, int py,
     }
 }
 
-/* Int to decimal string */
 static void set_itoa(int val, char *buf) {
     if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
     char tmp[12];
@@ -126,13 +153,58 @@ static void set_itoa(int val, char *buf) {
 
 static void settings_on_event(struct window *win, struct gui_event *evt) {
     if (evt->type == EVT_KEY_PRESS) {
-        return; /* No keyboard shortcuts needed */
+        uint8_t k = evt->key;
+
+        /* File picker keyboard */
+        if (mode == MODE_PICK_WP) {
+            if (k == 0x1B) { mode = MODE_NORMAL; return; }
+            if (k == KEY_UP) {
+                if (picker_sel > 0) picker_sel--;
+                if (picker_sel < picker_scroll) picker_scroll = picker_sel;
+                return;
+            }
+            if (k == KEY_DOWN) {
+                if (picker_sel < picker_count - 1) picker_sel++;
+                if (picker_sel >= picker_scroll + PICKER_VISIBLE)
+                    picker_scroll = picker_sel - PICKER_VISIBLE + 1;
+                return;
+            }
+            if (k == '\n' && picker_count > 0) {
+                struct fs_node *f = fs_get_node(picker_entries[picker_sel]);
+                if (f) desktop_set_wallpaper(f->name);
+                mode = MODE_NORMAL;
+                return;
+            }
+            return;
+        }
+        return;
     }
 
     if (evt->type != EVT_MOUSE_DOWN) return;
 
     int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
     int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
+
+    /* File picker click */
+    if (mode == MODE_PICK_WP && picker_count > 0) {
+        int popup_w = 220;
+        int popup_h = 20 + PICKER_VISIBLE * 18 + 4;
+        int popup_x = (SET_W - popup_w) / 2;
+        int popup_y = (SET_H - popup_h) / 2;
+        int list_x = popup_x + 4;
+        int list_y = popup_y + 20;
+        if (mx >= list_x && mx < list_x + popup_w - 8 &&
+            my >= list_y && my < list_y + PICKER_VISIBLE * 18) {
+            int idx = (my - list_y) / 18 + picker_scroll;
+            if (idx >= 0 && idx < picker_count) {
+                struct fs_node *f = fs_get_node(picker_entries[idx]);
+                if (f) desktop_set_wallpaper(f->name);
+                mode = MODE_NORMAL;
+            }
+            return;
+        }
+        return;
+    }
 
     /* Sidebar tab clicks */
     if (mx < SIDEBAR_W) {
@@ -147,7 +219,7 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
     int py = my;
 
     switch (current_tab) {
-    case 0: { /* Display — color picker grid */
+    case 0: { /* Display */
         int grid_x = 12;
         int grid_y = 40;
         int swatch = 28;
@@ -159,6 +231,21 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
             int idx = row * cols + col;
             if (idx < BG_COLORS)
                 desktop_set_bg(bg_palette[idx]);
+        }
+
+        /* Wallpaper buttons below color grid */
+        int wp_btn_y = grid_y + (BG_COLORS / cols) * (swatch + gap) + 8;
+        int btn_w = 80;
+        int btn_h = 22;
+        /* "Set Image" button */
+        if (px >= 12 && px < 12 + btn_w && py >= wp_btn_y && py < wp_btn_y + btn_h) {
+            picker_refresh();
+            mode = MODE_PICK_WP;
+        }
+        /* "Clear" button */
+        if (px >= 12 + btn_w + 8 && px < 12 + 2 * btn_w + 8 &&
+            py >= wp_btn_y && py < wp_btn_y + btn_h) {
+            desktop_clear_wallpaper();
         }
         break;
     }
@@ -180,11 +267,9 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
         int btn_w = 80;
         int btn_h = 24;
         int btn_gap = 12;
-        /* 24h button */
         if (px >= 12 && px < 12 + btn_w && py >= btn_y && py < btn_y + btn_h) {
             rtc_set_24h(true);
         }
-        /* 12h button */
         if (px >= 12 + btn_w + btn_gap && px < 12 + 2 * btn_w + btn_gap &&
             py >= btn_y && py < btn_y + btn_h) {
             rtc_set_24h(false);
@@ -204,6 +289,7 @@ void settings_create(void) {
     win_id = wm_create_window("Settings", 140, 60, SET_W, SET_H,
                                settings_on_event, NULL);
     current_tab = 0;
+    mode = MODE_NORMAL;
 }
 
 bool settings_is_alive(void) {
@@ -260,7 +346,6 @@ void settings_render(void) {
             int sx = grid_x + col * (swatch + gap);
             int sy = grid_y + row * (swatch + gap);
             set_rect(buf, cw, ch, sx, sy, swatch, swatch, bg_palette[i]);
-            /* Selection border */
             if (bg_palette[i] == current_bg) {
                 set_rect(buf, cw, ch, sx - 1, sy - 1, swatch + 2, 1, COLOR_WHITE);
                 set_rect(buf, cw, ch, sx - 1, sy + swatch, swatch + 2, 1, COLOR_WHITE);
@@ -269,8 +354,32 @@ void settings_render(void) {
             }
         }
 
+        /* Wallpaper image buttons */
+        int wp_btn_y = grid_y + (BG_COLORS / cols) * (swatch + gap) + 8;
+        int btn_w = 80;
+        int btn_h = 22;
+
+        set_text_nobg(buf, cw, ch, px0, wp_btn_y - 16, "Wallpaper Image:", C_TEXT);
+
+        /* "Set Image" button */
+        set_rect(buf, cw, ch, grid_x, wp_btn_y, btn_w, btn_h, C_BTN);
+        set_text(buf, cw, ch, grid_x + 4, wp_btn_y + 3, "Set Image", C_TEXT, C_BTN);
+
+        /* "Clear" button */
+        int clr_x = grid_x + btn_w + 8;
+        color_t clr_bg = desktop_has_wallpaper() ? C_BTN : COLOR_RGB(40, 40, 50);
+        color_t clr_fg = desktop_has_wallpaper() ? C_TEXT : C_DIM;
+        set_rect(buf, cw, ch, clr_x, wp_btn_y, btn_w, btn_h, clr_bg);
+        set_text(buf, cw, ch, clr_x + 16, wp_btn_y + 3, "Clear", clr_fg, clr_bg);
+
+        /* Status */
+        if (desktop_has_wallpaper()) {
+            set_text_nobg(buf, cw, ch, px0, wp_btn_y + btn_h + 4,
+                          "Image set", COLOR_RGB(80, 220, 80));
+        }
+
         /* Resolution info */
-        int info_y = grid_y + (BG_COLORS / cols) * (swatch + gap) + 12;
+        int info_y = wp_btn_y + btn_h + 22;
         set_text_nobg(buf, cw, ch, px0, info_y, "Resolution:", C_DIM);
         set_text_nobg(buf, cw, ch, px0, info_y + 18, "640 x 480 x 32bpp", C_TEXT);
         break;
@@ -295,7 +404,6 @@ void settings_render(void) {
             set_text(buf, cw, ch, tx, btn_y + 4, speed_labels[i], C_TEXT, bc);
         }
 
-        /* Description */
         set_text_nobg(buf, cw, ch, px0, btn_y + btn_h + 16, "Slow = precise", C_DIM);
         set_text_nobg(buf, cw, ch, px0, btn_y + btn_h + 34, "Fast = less movement", C_DIM);
         break;
@@ -310,19 +418,16 @@ void settings_render(void) {
         int btn_gap = 12;
         bool is_24h = rtc_get_24h();
 
-        /* 24h button */
         int bx1 = PANEL_X + 12;
         color_t bc1 = is_24h ? C_BTN_ACT : C_BTN;
         set_rect(buf, cw, ch, bx1, btn_y, btn_w, btn_h, bc1);
         set_text(buf, cw, ch, bx1 + 16, btn_y + 4, "24 Hr", C_TEXT, bc1);
 
-        /* 12h button */
         int bx2 = bx1 + btn_w + btn_gap;
         color_t bc2 = !is_24h ? C_BTN_ACT : C_BTN;
         set_rect(buf, cw, ch, bx2, btn_y, btn_w, btn_h, bc2);
         set_text(buf, cw, ch, bx2 + 16, btn_y + 4, "12 Hr", C_TEXT, bc2);
 
-        /* Live preview */
         char time_str[12];
         rtc_format_time(time_str);
         set_text_nobg(buf, cw, ch, px0, btn_y + btn_h + 20, "Current:", C_DIM);
@@ -340,7 +445,6 @@ void settings_render(void) {
         set_text_nobg(buf, cw, ch, px0, y, "Mode: Protected Mode", C_TEXT);
         y += 30;
 
-        /* Memory stats */
         set_text_nobg(buf, cw, ch, px0, y, "Memory:", C_TITLE);
         y += 20;
 
@@ -370,5 +474,45 @@ void settings_render(void) {
         set_text_nobg(buf, cw, ch, px0, y, "Built by Claude", C_DIM);
         break;
     }
+    }
+
+    /* File picker popup overlay (for wallpaper) */
+    if (mode == MODE_PICK_WP) {
+        int popup_w = 220;
+        int popup_h = 20 + PICKER_VISIBLE * 18 + 4;
+        int popup_x = (SET_W - popup_w) / 2;
+        int popup_y = (SET_H - popup_h) / 2;
+
+        /* Background */
+        set_rect(buf, cw, ch, popup_x, popup_y, popup_w, popup_h, COLOR_RGB(30, 30, 40));
+        /* Border */
+        set_rect(buf, cw, ch, popup_x, popup_y, popup_w, 1, COLOR_RGB(100, 100, 120));
+        set_rect(buf, cw, ch, popup_x, popup_y + popup_h - 1, popup_w, 1, COLOR_RGB(100, 100, 120));
+        set_rect(buf, cw, ch, popup_x, popup_y, 1, popup_h, COLOR_RGB(100, 100, 120));
+        set_rect(buf, cw, ch, popup_x + popup_w - 1, popup_y, 1, popup_h, COLOR_RGB(100, 100, 120));
+        /* Title */
+        set_text(buf, cw, ch, popup_x + 8, popup_y + 2, "Set Wallpaper",
+                 COLOR_YELLOW, COLOR_RGB(30, 30, 40));
+
+        if (picker_count == 0) {
+            set_text(buf, cw, ch, popup_x + 8, popup_y + 22, "(no files)",
+                     COLOR_RGB(120, 120, 120), COLOR_RGB(30, 30, 40));
+        } else {
+            int list_y = popup_y + 20;
+            int visible = picker_count - picker_scroll;
+            if (visible > PICKER_VISIBLE) visible = PICKER_VISIBLE;
+            for (int i = 0; i < visible; i++) {
+                int fi = picker_scroll + i;
+                int iy = list_y + i * 18;
+                struct fs_node *f = fs_get_node(picker_entries[fi]);
+                if (!f) continue;
+                color_t row_bg = (fi == picker_sel)
+                    ? COLOR_RGB(50, 80, 130) : COLOR_RGB(30, 30, 40);
+                set_rect(buf, cw, ch, popup_x + 2, iy, popup_w - 4, 18, row_bg);
+                set_text(buf, cw, ch, popup_x + 8, iy + 1, f->name, C_TEXT, row_bg);
+            }
+        }
+        set_text(buf, cw, ch, popup_x + 8, popup_y + popup_h - 18,
+                 "Enter=Set  Esc=Cancel", COLOR_RGB(100, 100, 100), COLOR_RGB(30, 30, 40));
     }
 }
