@@ -15,7 +15,7 @@
 #include "keyboard.h"
 
 #define SET_W        340
-#define SET_H        280
+#define SET_H        310
 #define SIDEBAR_W    80
 #define TAB_H        28
 #define TAB_COUNT    4
@@ -65,10 +65,10 @@ static const color_t bg_palette[BG_COLORS] = {
 };
 
 /* Resolution choices */
-#define RES_COUNT 3
-static const int res_widths[RES_COUNT]  = { 640, 800, 1024 };
-static const int res_heights[RES_COUNT] = { 480, 600, 768 };
-static const char *res_labels[RES_COUNT] = { "640x480", "800x600", "1024x768" };
+#define RES_COUNT 5
+static const int res_widths[RES_COUNT]  = { 640, 800, 1024, 1280, 1920 };
+static const int res_heights[RES_COUNT] = { 480, 600, 768, 720, 1080 };
+static const char *res_labels[RES_COUNT] = { "640x480", "800x600", "1024x768", "1280x720", "1920x1080" };
 
 static int win_id = -1;
 static int current_tab = 0;
@@ -254,15 +254,19 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
             desktop_clear_wallpaper();
         }
 
-        /* Resolution buttons */
+        /* Resolution buttons (2 rows: 3 + 2) */
         {
             int res_y = wp_btn_y + btn_h + 36;
-            int rbtn_w = 72;
+            int rbtn_w = 76;
             int rbtn_h = 22;
-            int rbtn_gap = 6;
+            int rbtn_gap = 4;
+            int row_gap = 4;
             for (int i = 0; i < RES_COUNT; i++) {
-                int bx = 12 + i * (rbtn_w + rbtn_gap);
-                if (px >= bx && px < bx + rbtn_w && py >= res_y && py < res_y + rbtn_h) {
+                int r = i / 3;
+                int c = i % 3;
+                int bx = 12 + c * (rbtn_w + rbtn_gap);
+                int by = res_y + r * (rbtn_h + row_gap);
+                if (px >= bx && px < bx + rbtn_w && py >= by && py < by + rbtn_h) {
                     if (fb_set_mode(res_widths[i], res_heights[i])) {
                         mouse_set_bounds(fb_get_width(), fb_get_height());
                         mouse_clamp();
@@ -405,21 +409,26 @@ void settings_render(void) {
         int info_y = wp_btn_y + btn_h + 22;
         set_text_nobg(buf, cw, ch, px0, info_y, "Resolution:", C_TEXT);
 
+        /* Resolution buttons (2 rows: 3 + 2) */
         {
             int res_y = info_y + 14;
-            int rbtn_w = 72;
+            int rbtn_w = 76;
             int rbtn_h = 22;
-            int rbtn_gap = 6;
+            int rbtn_gap = 4;
+            int row_gap = 4;
             int cur_w = fb_get_width();
             int cur_h = fb_get_height();
             for (int i = 0; i < RES_COUNT; i++) {
-                int bx = grid_x + i * (rbtn_w + rbtn_gap);
+                int r = i / 3;
+                int c = i % 3;
+                int bx = grid_x + c * (rbtn_w + rbtn_gap);
+                int by = res_y + r * (rbtn_h + row_gap);
                 color_t bc = (cur_w == res_widths[i] && cur_h == res_heights[i])
                     ? C_BTN_ACT : C_BTN;
-                set_rect(buf, cw, ch, bx, res_y, rbtn_w, rbtn_h, bc);
+                set_rect(buf, cw, ch, bx, by, rbtn_w, rbtn_h, bc);
                 int tlen = str_len(res_labels[i]);
                 int tx = bx + (rbtn_w - tlen * 8) / 2;
-                set_text(buf, cw, ch, tx, res_y + 3, res_labels[i], C_TEXT, bc);
+                set_text(buf, cw, ch, tx, by + 3, res_labels[i], C_TEXT, bc);
             }
         }
         break;

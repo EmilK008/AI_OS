@@ -70,10 +70,10 @@ static const color_t palette[PAL_COUNT] = {
 };
 
 /* Canvas size presets */
-#define SIZE_COUNT 4
-static const int size_w[SIZE_COUNT] = { 380, 640, 800, 1024 };
-static const int size_h[SIZE_COUNT] = { 266, 480, 600, 768 };
-static const char *size_labels[SIZE_COUNT] = { "Small", "640x480", "800x600", "1024x768" };
+#define SIZE_COUNT 6
+static const int size_w[SIZE_COUNT] = { 380, 640, 800, 1024, 1280, 1920 };
+static const int size_h[SIZE_COUNT] = { 266, 480, 600, 768, 720, 1080 };
+static const char *size_labels[SIZE_COUNT] = { "Small", "640x480", "800x600", "1024x768", "1280x720", "1920x1080" };
 
 /* X offset where brush/action buttons start (after 8 swatches) */
 #define TOOLS_X  (4 + PAL_ROW * (SWATCH_SZ + SWATCH_GAP) + 8)
