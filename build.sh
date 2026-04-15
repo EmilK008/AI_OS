@@ -60,6 +60,8 @@ $CC $CFLAGS apps/editor.c      -o "$BUILD_DIR/editor.o"
 $CC $CFLAGS apps/snake.c       -o "$BUILD_DIR/snake.o"
 $CC $CFLAGS apps/snake_window.c -o "$BUILD_DIR/snake_window.o"
 $CC $CFLAGS apps/filemgr.c     -o "$BUILD_DIR/filemgr.o"
+$CC $CFLAGS apps/calculator.c  -o "$BUILD_DIR/calculator.o"
+$CC $CFLAGS apps/notepad.c     -o "$BUILD_DIR/notepad.o"
 # GUI
 $CC $CFLAGS gui/font_data.c    -o "$BUILD_DIR/font_data.o"
 $CC $CFLAGS gui/event.c        -o "$BUILD_DIR/event.o"
@@ -86,6 +88,8 @@ $LD $LDFLAGS \
     "$BUILD_DIR/snake.o" \
     "$BUILD_DIR/snake_window.o" \
     "$BUILD_DIR/filemgr.o" \
+    "$BUILD_DIR/calculator.o" \
+    "$BUILD_DIR/notepad.o" \
     "$BUILD_DIR/speaker.o" \
     "$BUILD_DIR/framebuffer.o" \
     "$BUILD_DIR/mouse.o" \

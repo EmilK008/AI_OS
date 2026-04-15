@@ -22,6 +22,8 @@
 #include "io.h"
 #include "snake_window.h"
 #include "filemgr.h"
+#include "calculator.h"
+#include "notepad.h"
 
 /* Minimal debug output via QEMU debug port (0xE9) */
 static void dbg_putc(char c) {
@@ -100,6 +102,8 @@ void kernel_main(void) {
             terminal_render();
             snake_window_render();
             filemgr_render();
+            calculator_render();
+            notepad_render();
             wm_render_all();
 
             /* Yield CPU until next interrupt */

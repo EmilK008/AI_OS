@@ -6,21 +6,25 @@
 #include "terminal.h"
 #include "snake_window.h"
 #include "filemgr.h"
+#include "calculator.h"
+#include "notepad.h"
 #include "shell.h"
 #include "process.h"
 
 #define MENU_X       2
 #define MENU_ITEM_W  120
 #define MENU_ITEM_H  22
-#define MENU_ITEMS   3
+#define MENU_ITEMS   5
 #define MENU_PAD     2
 
 static bool menu_open = false;
 
 static const char *menu_labels[MENU_ITEMS] = {
     "Terminal",
-    "Snake",
     "Files",
+    "Notepad",
+    "Calculator",
+    "Snake",
 };
 
 static int menu_y(void) {
@@ -56,11 +60,17 @@ void appmenu_on_click(int item) {
             process_create("shell", shell_entry);
         }
         break;
-    case 1: /* Snake */
-        snake_window_create();
-        break;
-    case 2: /* Files */
+    case 1: /* Files */
         filemgr_create();
+        break;
+    case 2: /* Notepad */
+        notepad_create();
+        break;
+    case 3: /* Calculator */
+        calculator_create();
+        break;
+    case 4: /* Snake */
+        snake_window_create();
         break;
     }
 }
