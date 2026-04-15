@@ -55,6 +55,7 @@ $CC $CFLAGS drivers/speaker.c  -o "$BUILD_DIR/speaker.o"
 $CC $CFLAGS drivers/framebuffer.c -o "$BUILD_DIR/framebuffer.o"
 $CC $CFLAGS drivers/mouse.c    -o "$BUILD_DIR/mouse.o"
 $CC $CFLAGS drivers/rtc.c     -o "$BUILD_DIR/rtc.o"
+$CC $CFLAGS drivers/ata.c     -o "$BUILD_DIR/ata.o"
 # Shell & Apps
 $CC $CFLAGS shell/shell.c      -o "$BUILD_DIR/shell.o"
 $CC $CFLAGS apps/editor.c      -o "$BUILD_DIR/editor.o"
@@ -99,6 +100,7 @@ $LD $LDFLAGS \
     "$BUILD_DIR/framebuffer.o" \
     "$BUILD_DIR/mouse.o" \
     "$BUILD_DIR/rtc.o" \
+    "$BUILD_DIR/ata.o" \
     "$BUILD_DIR/font_data.o" \
     "$BUILD_DIR/event.o" \
     "$BUILD_DIR/window.o" \
@@ -124,8 +126,18 @@ if [ "$IMGSIZE" -lt "$FLOPPYSIZE" ]; then
 fi
 
 echo "      ai_os.img: $(wc -c < "$BUILD_DIR/ai_os.img") bytes"
+
+# Create hard disk image for persistent storage (8MB, only if not existing)
+DISK_IMG="$BUILD_DIR/disk.img"
+if [ ! -f "$DISK_IMG" ]; then
+    dd if=/dev/zero of="$DISK_IMG" bs=512 count=16384 2>/dev/null
+    echo "      disk.img: 8 MB (created fresh)"
+else
+    echo "      disk.img: 8 MB (existing, preserved)"
+fi
+
 echo ""
 echo "========================================"
 echo "  Build complete!"
-echo "  Run: qemu-system-i386 -fda build/ai_os.img -vga std -m 128"
+echo "  Run: qemu-system-i386 -fda build/ai_os.img -hda build/disk.img -vga std -m 128"
 echo "========================================"

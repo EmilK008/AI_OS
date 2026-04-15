@@ -23,6 +23,7 @@ struct fs_node {
 };
 
 void     fs_init(void);
+void     fs_init_defaults(void);
 int      fs_create(const char *name, uint8_t type);
 int      fs_find(const char *name);
 int      fs_write_file(int idx, const char *data, uint32_t size);
@@ -34,5 +35,8 @@ int      fs_get_cwd(void);
 const char *fs_get_cwd_name(void);
 struct fs_node *fs_get_node(int idx);
 void     fs_get_path(int idx, char *buf, int buf_size);
+int      fs_save_to_disk(void);
+int      fs_load_from_disk(void);
+void     fs_enable_autosave(void);
 
 #endif

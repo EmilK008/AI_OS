@@ -27,6 +27,7 @@
 #include "notepad.h"
 #include "paint.h"
 #include "settings.h"
+#include "ata.h"
 
 /* Minimal debug output via QEMU debug port (0xE9) */
 static void dbg_putc(char c) {
@@ -51,7 +52,23 @@ void kernel_main(void) {
     mouse_init();
     dbg_print("KBD/EVT/MOUSE ok\n");
     rtc_init();
+
+    /* Disk + Filesystem */
+    bool have_disk = ata_init();
+    dbg_print(have_disk ? "ATA ok\n" : "ATA: no disk\n");
+
     fs_init();
+    if (have_disk && fs_load_from_disk() == 0) {
+        dbg_print("DISK: loaded\n");
+    } else {
+        fs_init_defaults();
+        if (have_disk) {
+            fs_save_to_disk();
+            dbg_print("DISK: formatted\n");
+        }
+    }
+    fs_enable_autosave();
+
     process_init();
     dbg_print("FS/PROC ok\n");
 

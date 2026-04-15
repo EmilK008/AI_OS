@@ -13,6 +13,7 @@
 #include "process.h"
 #include "editor.h"
 #include "speaker.h"
+#include "ata.h"
 #include "rtc.h"
 #include "snake.h"
 
@@ -94,20 +95,23 @@ static void cmd_help(void) {
     help_row("  ps          List processes",            "  panic <t>   Test crash handler");
     help_row("  kill <pid>  Kill process",              "  reboot      Reboot system");
     help_row("  run <prog>  Background program",        "  halt        Shutdown");
-    help_row("  snake       Play Snake!",               NULL);
+    help_row("  snake       Play Snake!",               "  save        Save FS to disk");
+    help_row("  ",                                      "  format      Format disk");
     vga_print_colored("              ", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
     vga_print_colored("(clock, counter, fib)\n", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
 }
 
 static void cmd_info(void) {
     vga_print_colored("\n=== System Information ===\n", VGA_COLOR(VGA_YELLOW, VGA_BLACK));
-    vga_print("  OS:         AI_OS v0.2\n");
+    vga_print("  OS:         AI_OS v0.3\n");
     vga_print("  Builder:    Claude (Anthropic)\n");
     vga_print("  Arch:       x86 (i386) Protected Mode\n");
     vga_print("  Display:    VGA Text Mode 80x25\n");
     vga_print("  Input:      PS/2 Keyboard\n");
     vga_print("  Scheduler:  Preemptive Round-Robin\n");
-    vga_print("  Filesystem: RAM Filesystem (ramfs)\n");
+    vga_print(ata_available()
+        ? "  Filesystem: RAM + ATA Disk Persistence\n"
+        : "  Filesystem: RAM Filesystem (ramfs)\n");
     vga_print("  Memory:     ");
     vga_print_dec(memory_get_free() / 1024);
     vga_print(" KB free / ");
@@ -229,6 +233,32 @@ static void cmd_reboot(void) {
 static void cmd_halt(void) {
     vga_print_colored("\n  System halted. Goodbye!\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
     __asm__ __volatile__("cli; hlt");
+}
+
+static void cmd_save(void) {
+    if (!ata_available()) {
+        vga_print_colored("  No disk available.\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+    if (fs_save_to_disk() == 0) {
+        vga_print_colored("  Filesystem saved to disk.\n", VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK));
+    } else {
+        vga_print_colored("  Disk write failed!\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+    }
+}
+
+static void cmd_format(void) {
+    if (!ata_available()) {
+        vga_print_colored("  No disk available.\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+    fs_init();
+    fs_init_defaults();
+    if (fs_save_to_disk() == 0) {
+        vga_print_colored("  Disk formatted and defaults restored.\n", VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK));
+    } else {
+        vga_print_colored("  Disk format failed!\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+    }
 }
 
 static void cmd_logo(void) {
@@ -725,6 +755,8 @@ void shell_execute(char *input) {
     else if (str_eq(argv[0], "color"))   cmd_color(argc, argv);
     else if (str_eq(argv[0], "reboot"))  cmd_reboot();
     else if (str_eq(argv[0], "halt"))    cmd_halt();
+    else if (str_eq(argv[0], "save"))    cmd_save();
+    else if (str_eq(argv[0], "format"))  cmd_format();
     else if (str_eq(argv[0], "logo"))    cmd_logo();
     else if (str_eq(argv[0], "matrix"))  cmd_matrix();
     else if (str_eq(argv[0], "calc"))    cmd_calc(argc, argv);
