@@ -8,6 +8,8 @@
 #define CMOS_ADDR  0x70
 #define CMOS_DATA  0x71
 
+static bool rtc_24h_mode = true;
+
 /* CMOS register indices */
 #define RTC_SECONDS   0x00
 #define RTC_MINUTES   0x02
@@ -112,15 +114,34 @@ void rtc_read(struct rtc_time *t) {
 void rtc_format_time(char *buf) {
     struct rtc_time t;
     rtc_read(&t);
-    buf[0] = '0' + (t.hours / 10);
-    buf[1] = '0' + (t.hours % 10);
-    buf[2] = ':';
-    buf[3] = '0' + (t.minutes / 10);
-    buf[4] = '0' + (t.minutes % 10);
-    buf[5] = ':';
-    buf[6] = '0' + (t.seconds / 10);
-    buf[7] = '0' + (t.seconds % 10);
-    buf[8] = '\0';
+
+    uint8_t h = t.hours;
+    if (!rtc_24h_mode) {
+        bool pm = (h >= 12);
+        if (h == 0) h = 12;
+        else if (h > 12) h -= 12;
+        buf[0] = (h >= 10) ? '0' + (h / 10) : ' ';
+        buf[1] = '0' + (h % 10);
+        buf[2] = ':';
+        buf[3] = '0' + (t.minutes / 10);
+        buf[4] = '0' + (t.minutes % 10);
+        buf[5] = ':';
+        buf[6] = '0' + (t.seconds / 10);
+        buf[7] = '0' + (t.seconds % 10);
+        buf[8] = pm ? 'P' : 'A';
+        buf[9] = 'M';
+        buf[10] = '\0';
+    } else {
+        buf[0] = '0' + (h / 10);
+        buf[1] = '0' + (h % 10);
+        buf[2] = ':';
+        buf[3] = '0' + (t.minutes / 10);
+        buf[4] = '0' + (t.minutes % 10);
+        buf[5] = ':';
+        buf[6] = '0' + (t.seconds / 10);
+        buf[7] = '0' + (t.seconds % 10);
+        buf[8] = '\0';
+    }
 }
 
 void rtc_format_date(char *buf) {
@@ -138,4 +159,12 @@ void rtc_format_date(char *buf) {
     buf[8] = '0' + (t.day / 10);
     buf[9] = '0' + (t.day % 10);
     buf[10] = '\0';
+}
+
+void rtc_set_24h(bool use_24h) {
+    rtc_24h_mode = use_24h;
+}
+
+bool rtc_get_24h(void) {
+    return rtc_24h_mode;
 }

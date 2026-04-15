@@ -64,6 +64,7 @@ $CC $CFLAGS apps/filemgr.c     -o "$BUILD_DIR/filemgr.o"
 $CC $CFLAGS apps/calculator.c  -o "$BUILD_DIR/calculator.o"
 $CC $CFLAGS apps/notepad.c     -o "$BUILD_DIR/notepad.o"
 $CC $CFLAGS apps/paint.c      -o "$BUILD_DIR/paint.o"
+$CC $CFLAGS apps/settings.c   -o "$BUILD_DIR/settings.o"
 # GUI
 $CC $CFLAGS gui/font_data.c    -o "$BUILD_DIR/font_data.o"
 $CC $CFLAGS gui/event.c        -o "$BUILD_DIR/event.o"
@@ -93,6 +94,7 @@ $LD $LDFLAGS \
     "$BUILD_DIR/calculator.o" \
     "$BUILD_DIR/notepad.o" \
     "$BUILD_DIR/paint.o" \
+    "$BUILD_DIR/settings.o" \
     "$BUILD_DIR/speaker.o" \
     "$BUILD_DIR/framebuffer.o" \
     "$BUILD_DIR/mouse.o" \

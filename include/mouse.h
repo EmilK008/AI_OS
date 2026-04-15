@@ -13,5 +13,7 @@ bool mouse_left_click(void);
 bool mouse_right_click(void);
 void mouse_clear_clicks(void);
 void mouse_set_bounds(int max_x, int max_y);
+void mouse_set_speed(int speed);
+int  mouse_get_speed(void);
 
 #endif

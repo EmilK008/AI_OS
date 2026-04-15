@@ -17,6 +17,7 @@ static volatile int     packet_byte = 0;
 static volatile uint8_t packet[3];
 static int max_x = 640;
 static int max_y = 480;
+static int mouse_speed = 2;  /* 1=slow, 2=normal, 3=fast */
 
 static void mouse_wait_input(void) {
     int timeout = 100000;
@@ -107,6 +108,10 @@ void mouse_handler(void) {
             /* PS/2 Y-axis is inverted */
             dy = -dy;
 
+            /* Apply mouse speed scaling (1=slow, 2=normal, 3=fast) */
+            dx = dx * mouse_speed / 2;
+            dy = dy * mouse_speed / 2;
+
             /* Update absolute position */
             mouse_x += dx;
             mouse_y += dy;
@@ -192,4 +197,14 @@ void mouse_clear_clicks(void) {
 void mouse_set_bounds(int mx, int my) {
     max_x = mx;
     max_y = my;
+}
+
+void mouse_set_speed(int speed) {
+    if (speed < 1) speed = 1;
+    if (speed > 3) speed = 3;
+    mouse_speed = speed;
+}
+
+int mouse_get_speed(void) {
+    return mouse_speed;
 }

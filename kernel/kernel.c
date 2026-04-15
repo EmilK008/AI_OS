@@ -26,6 +26,7 @@
 #include "calculator.h"
 #include "notepad.h"
 #include "paint.h"
+#include "settings.h"
 
 /* Minimal debug output via QEMU debug port (0xE9) */
 static void dbg_putc(char c) {
@@ -108,6 +109,7 @@ void kernel_main(void) {
             calculator_render();
             notepad_render();
             paint_render();
+            settings_render();
             wm_render_all();
 
             /* Yield CPU until next interrupt */

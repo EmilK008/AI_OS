@@ -7,12 +7,22 @@
 #include "rtc.h"
 #include "string.h"
 
+static color_t desktop_bg = COLOR_DESKTOP_BG;
+
 void desktop_init(void) {
     /* Nothing to allocate yet */
 }
 
+void desktop_set_bg(color_t c) {
+    desktop_bg = c;
+}
+
+color_t desktop_get_bg(void) {
+    return desktop_bg;
+}
+
 void desktop_draw_background(void) {
-    fb_clear(COLOR_DESKTOP_BG);
+    fb_clear(desktop_bg);
 }
 
 void desktop_draw_taskbar(void) {
