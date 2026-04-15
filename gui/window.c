@@ -233,6 +233,14 @@ void wm_handle_event(struct gui_event *evt) {
             dragging = false;
             drag_id = -1;
         }
+        /* Forward mouse up to focused window */
+        for (int i = z_count - 1; i >= 0; i--) {
+            struct window *win = &windows[z_order[i]];
+            if (win->alive && win->focused && win->on_event) {
+                win->on_event(win, evt);
+                break;
+            }
+        }
     } else if (evt->type == EVT_MOUSE_MOVE) {
         if (dragging && drag_id >= 0 && windows[drag_id].alive) {
             struct window *win = &windows[drag_id];
@@ -242,6 +250,15 @@ void wm_handle_event(struct gui_event *evt) {
             if (win->y < 0) win->y = 0;
             if (win->y > fb_get_height() - TITLEBAR_HEIGHT)
                 win->y = (int16_t)(fb_get_height() - TITLEBAR_HEIGHT);
+        } else {
+            /* Forward mouse move to focused window */
+            for (int i = z_count - 1; i >= 0; i--) {
+                struct window *win = &windows[z_order[i]];
+                if (win->alive && win->focused && win->on_event) {
+                    win->on_event(win, evt);
+                    break;
+                }
+            }
         }
     } else if (evt->type == EVT_KEY_PRESS) {
         /* Route to focused window */

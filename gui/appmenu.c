@@ -8,13 +8,14 @@
 #include "filemgr.h"
 #include "calculator.h"
 #include "notepad.h"
+#include "paint.h"
 #include "shell.h"
 #include "process.h"
 
 #define MENU_X       2
 #define MENU_ITEM_W  120
 #define MENU_ITEM_H  22
-#define MENU_ITEMS   5
+#define MENU_ITEMS   6
 #define MENU_PAD     2
 
 static bool menu_open = false;
@@ -23,6 +24,7 @@ static const char *menu_labels[MENU_ITEMS] = {
     "Terminal",
     "Files",
     "Notepad",
+    "Paint",
     "Calculator",
     "Snake",
 };
@@ -66,10 +68,13 @@ void appmenu_on_click(int item) {
     case 2: /* Notepad */
         notepad_create();
         break;
-    case 3: /* Calculator */
+    case 3: /* Paint */
+        paint_create();
+        break;
+    case 4: /* Calculator */
         calculator_create();
         break;
-    case 4: /* Snake */
+    case 5: /* Snake */
         snake_window_create();
         break;
     }

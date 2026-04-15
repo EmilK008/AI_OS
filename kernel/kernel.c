@@ -25,6 +25,7 @@
 #include "filemgr.h"
 #include "calculator.h"
 #include "notepad.h"
+#include "paint.h"
 
 /* Minimal debug output via QEMU debug port (0xE9) */
 static void dbg_putc(char c) {
@@ -106,6 +107,7 @@ void kernel_main(void) {
             filemgr_render();
             calculator_render();
             notepad_render();
+            paint_render();
             wm_render_all();
 
             /* Yield CPU until next interrupt */
