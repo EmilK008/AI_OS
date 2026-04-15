@@ -18,8 +18,8 @@
 #define CANVAS_BG     COLOR_WHITE
 
 /* Maximum canvas dimensions (flat static buffer in BSS) */
-#define MAX_CANVAS_W  1024
-#define MAX_CANVAS_H  768
+#define MAX_CANVAS_W  1920
+#define MAX_CANVAS_H  1080
 
 /* Default canvas (same as original) */
 #define DEFAULT_CANVAS_W  380
