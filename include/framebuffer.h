@@ -38,5 +38,6 @@ void    fb_clear(color_t color);
 int     fb_get_width(void);
 int     fb_get_height(void);
 color_t *fb_get_backbuf(void);
+bool    fb_set_mode(int width, int height);
 
 #endif

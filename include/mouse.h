@@ -15,5 +15,6 @@ void mouse_clear_clicks(void);
 void mouse_set_bounds(int max_x, int max_y);
 void mouse_set_speed(int speed);
 int  mouse_get_speed(void);
+void mouse_clamp(void);
 
 #endif

@@ -208,3 +208,8 @@ void mouse_set_speed(int speed) {
 int mouse_get_speed(void) {
     return mouse_speed;
 }
+
+void mouse_clamp(void) {
+    if (mouse_x >= max_x) mouse_x = max_x - 1;
+    if (mouse_y >= max_y) mouse_y = max_y - 1;
+}

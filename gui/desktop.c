@@ -69,7 +69,7 @@ void desktop_set_wallpaper(const char *filename) {
 
     int w = (uint8_t)d[3] | ((uint8_t)d[4] << 8);
     int h = (uint8_t)d[5] | ((uint8_t)d[6] << 8);
-    if (w <= 0 || h <= 0 || w > 640 || h > 480) { dbg_print("WP: bad dims\n"); return; }
+    if (w <= 0 || h <= 0 || w > fb_get_width() || h > fb_get_height()) { dbg_print("WP: bad dims\n"); return; }
 
     /* Allocate as palette indices — only 1 byte per pixel */
     uint32_t alloc_size = (uint32_t)w * (uint32_t)h;

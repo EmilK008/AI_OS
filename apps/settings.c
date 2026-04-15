@@ -14,6 +14,19 @@
 #include "fs.h"
 #include "keyboard.h"
 
+/* Debug output via QEMU port 0xE9 */
+static void s_dbg_putc(char c) {
+    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)c), "Nd"((uint16_t)0xE9));
+}
+static void s_dbg_print(const char *s) { while (*s) s_dbg_putc(*s++); }
+static void s_dbg_dec(int v) {
+    if (v < 0) { s_dbg_putc('-'); v = -v; }
+    if (v == 0) { s_dbg_putc('0'); return; }
+    char tmp[12]; int i = 0;
+    while (v > 0) { tmp[i++] = '0' + (v % 10); v /= 10; }
+    while (i > 0) s_dbg_putc(tmp[--i]);
+}
+
 #define SET_W        340
 #define SET_H        280
 #define SIDEBAR_W    80
@@ -63,6 +76,12 @@ static const color_t bg_palette[BG_COLORS] = {
     COLOR_RGB(40, 90, 90),     /* Seafoam */
     COLOR_RGB(90, 90, 90),     /* Grey */
 };
+
+/* Resolution choices */
+#define RES_COUNT 3
+static const int res_widths[RES_COUNT]  = { 640, 800, 1024 };
+static const int res_heights[RES_COUNT] = { 480, 600, 768 };
+static const char *res_labels[RES_COUNT] = { "640x480", "800x600", "1024x768" };
 
 static int win_id = -1;
 static int current_tab = 0;
@@ -247,6 +266,31 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
             py >= wp_btn_y && py < wp_btn_y + btn_h) {
             desktop_clear_wallpaper();
         }
+
+        /* Resolution buttons */
+        {
+            int res_y = wp_btn_y + btn_h + 36;
+            int rbtn_w = 72;
+            int rbtn_h = 22;
+            int rbtn_gap = 6;
+            s_dbg_print("SET: disp click px="); s_dbg_dec(px);
+            s_dbg_print(" py="); s_dbg_dec(py);
+            s_dbg_print(" res_y="); s_dbg_dec(res_y);
+            s_dbg_putc('\n');
+            for (int i = 0; i < RES_COUNT; i++) {
+                int bx = 12 + i * (rbtn_w + rbtn_gap);
+                if (px >= bx && px < bx + rbtn_w && py >= res_y && py < res_y + rbtn_h) {
+                    s_dbg_print("SET: res btn "); s_dbg_dec(i);
+                    s_dbg_print(" -> "); s_dbg_dec(res_widths[i]);
+                    s_dbg_putc('x'); s_dbg_dec(res_heights[i]);
+                    s_dbg_putc('\n');
+                    if (fb_set_mode(res_widths[i], res_heights[i])) {
+                        mouse_set_bounds(fb_get_width(), fb_get_height());
+                        mouse_clamp();
+                    }
+                }
+            }
+        }
         break;
     }
     case 1: { /* Mouse — speed buttons */
@@ -378,10 +422,27 @@ void settings_render(void) {
                           "Image set", COLOR_RGB(80, 220, 80));
         }
 
-        /* Resolution info */
+        /* Resolution buttons */
         int info_y = wp_btn_y + btn_h + 22;
-        set_text_nobg(buf, cw, ch, px0, info_y, "Resolution:", C_DIM);
-        set_text_nobg(buf, cw, ch, px0, info_y + 18, "640 x 480 x 32bpp", C_TEXT);
+        set_text_nobg(buf, cw, ch, px0, info_y, "Resolution:", C_TEXT);
+
+        {
+            int res_y = info_y + 14;
+            int rbtn_w = 72;
+            int rbtn_h = 22;
+            int rbtn_gap = 6;
+            int cur_w = fb_get_width();
+            int cur_h = fb_get_height();
+            for (int i = 0; i < RES_COUNT; i++) {
+                int bx = grid_x + i * (rbtn_w + rbtn_gap);
+                color_t bc = (cur_w == res_widths[i] && cur_h == res_heights[i])
+                    ? C_BTN_ACT : C_BTN;
+                set_rect(buf, cw, ch, bx, res_y, rbtn_w, rbtn_h, bc);
+                int tlen = str_len(res_labels[i]);
+                int tx = bx + (rbtn_w - tlen * 8) / 2;
+                set_text(buf, cw, ch, tx, res_y + 3, res_labels[i], C_TEXT, bc);
+            }
+        }
         break;
     }
     case 1: { /* Mouse */
