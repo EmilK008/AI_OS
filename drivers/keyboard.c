@@ -128,7 +128,10 @@ void keyboard_handler(void) {
             /* Ctrl combinations */
             if (ctrl_pressed) {
                 if (c == 'c' || c == 'C') c = 3;       /* ETX - Ctrl+C */
+                else if (c == 'f' || c == 'F') c = 6;  /* ACK - Ctrl+F */
+                else if (c == 'h' || c == 'H') c = 8;  /* BS  - Ctrl+H */
                 else if (c == 'l' || c == 'L') c = 12;  /* FF - Ctrl+L */
+                else if (c == 'n' || c == 'N') c = 14;  /* SO - Ctrl+N */
                 else if (c == 's' || c == 'S') c = 19;  /* Ctrl+S */
                 else if (c == 'q' || c == 'Q') c = 17;  /* Ctrl+Q */
             }

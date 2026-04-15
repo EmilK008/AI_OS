@@ -52,6 +52,31 @@ start:
     jbe  .count_ok
     mov  al, [sectors_left]
 .count_ok:
+    ; Limit read to avoid crossing a 64KB DMA boundary
+    ; Physical address = load_seg * 16
+    ; Remaining bytes in current 64KB page = 0x10000 - (phys & 0xFFFF)
+    ; Max sectors before boundary = remaining / 512
+    push ax                  ; save track-limited count
+    mov  ax, [load_seg]
+    shl  ax, 4               ; low 16 bits of physical addr (phys & 0xFFFF)
+    neg  ax                   ; 0x10000 - low16 = bytes to boundary (mod 64K)
+    jz   .no_dma_limit        ; exactly at boundary start: full 64KB available
+    shr  ax, 9                ; divide by 512 = max sectors before boundary
+    jz   .one_sector          ; less than 512 bytes left: do 1 sector
+    pop  bx                   ; retrieve track-limited count
+    cmp  bl, al
+    jbe  .dma_ok
+    mov  bl, al               ; limit to DMA boundary
+.dma_ok:
+    mov  al, bl
+    jmp  .do_read
+.one_sector:
+    pop  ax
+    mov  al, 1
+    jmp  .do_read
+.no_dma_limit:
+    pop  ax                   ; use original count
+.do_read:
     mov  [cur_count], al
 
     ; Read sectors

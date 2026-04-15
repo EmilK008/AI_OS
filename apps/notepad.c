@@ -1,5 +1,7 @@
 /* ===========================================================================
- * Notepad - Windowed text editor app
+ * Notepad - Windowed text editor with customization features
+ *   Themes, color picker, find/replace, line numbers, word wrap toggle,
+ *   word count, Ctrl+S save, Ctrl+F find, Ctrl+N new
  * =========================================================================== */
 #include "notepad.h"
 #include "window.h"
@@ -10,40 +12,122 @@
 #include "keyboard.h"
 #include "timer.h"
 
-#define NP_W        400
+#define NP_W        460
 #define NP_H        300
 #define TOOLBAR_H   24
+#define TOOLBAR2_Y  TOOLBAR_H
+#define TOOLBAR2_H  22
+#define HEADER_H    (TOOLBAR_H + TOOLBAR2_H)
 #define STATUS_H    20
-#define TEXT_X      4
-#define TEXT_Y      (TOOLBAR_H + 2)
-#define TEXT_W      (NP_W - 8)
-#define TEXT_H      (NP_H - TOOLBAR_H - STATUS_H - 4)
-#define MAX_COLS    (TEXT_W / 8)
-#define MAX_ROWS    (TEXT_H / 16)
+#define TEXT_PAD     4
+#define GUTTER_W     32   /* line number gutter width when enabled */
 #define BUF_SIZE    4000
+#define FIND_MAX    40
+#define REPLACE_MAX 40
 
-/* Button defs */
-#define NP_BTN_COUNT 3
-#define NP_BTN_W     48
-#define NP_BTN_H     18
-#define NP_BTN_GAP   4
+/* Toolbar buttons - row 1 */
+#define ROW1_BTN_COUNT 8
+#define BTN_W      50
+#define BTN_H      18
+#define BTN_GAP    4
 
 /* Modes */
 #define MODE_EDIT    0
-#define MODE_OPEN    1  /* filename input for open */
-#define MODE_SAVE    2  /* filename input for save */
+#define MODE_OPEN    1
+#define MODE_SAVE    2
+#define MODE_FIND    3
+#define MODE_COLOR   4
 
-/* Colors */
-#define C_BG        COLOR_RGB(30, 30, 38)
-#define C_TOOLBAR   COLOR_RGB(50, 50, 62)
-#define C_TEXT_BG   COLOR_RGB(20, 20, 28)
-#define C_TEXT_FG   COLOR_WHITE
-#define C_CURSOR    COLOR_RGB(100, 200, 255)
-#define C_STATUS_BG COLOR_RGB(40, 40, 52)
-#define C_STATUS_FG COLOR_RGB(180, 180, 180)
-#define C_BTN       COLOR_RGB(60, 60, 78)
-#define C_BTN_TEXT  COLOR_WHITE
-#define C_LINE_NUM  COLOR_RGB(80, 80, 100)
+/* Theme definition */
+struct np_theme {
+    const char *name;
+    color_t text_bg;
+    color_t text_fg;
+    color_t toolbar_bg;
+    color_t status_bg;
+    color_t status_fg;
+    color_t gutter_bg;
+    color_t gutter_fg;
+    color_t cursor_color;
+    color_t highlight_bg;
+    color_t btn_bg;
+    color_t btn_fg;
+};
+
+#define THEME_COUNT 4
+static const struct np_theme themes[THEME_COUNT] = {
+    { /* Dark */
+        "Dark",
+        COLOR_RGB(20, 20, 28),     /* text_bg */
+        COLOR_WHITE,               /* text_fg */
+        COLOR_RGB(50, 50, 62),     /* toolbar_bg */
+        COLOR_RGB(40, 40, 52),     /* status_bg */
+        COLOR_RGB(180, 180, 180),  /* status_fg */
+        COLOR_RGB(28, 28, 38),     /* gutter_bg */
+        COLOR_RGB(80, 80, 100),    /* gutter_fg */
+        COLOR_RGB(100, 200, 255),  /* cursor_color */
+        COLOR_RGB(80, 60, 0),      /* highlight_bg (find match) */
+        COLOR_RGB(60, 60, 78),     /* btn_bg */
+        COLOR_WHITE,               /* btn_fg */
+    },
+    { /* Light */
+        "Light",
+        COLOR_RGB(245, 245, 240),  /* text_bg */
+        COLOR_RGB(20, 20, 20),     /* text_fg */
+        COLOR_RGB(210, 210, 215),  /* toolbar_bg */
+        COLOR_RGB(220, 220, 225),  /* status_bg */
+        COLOR_RGB(60, 60, 60),     /* status_fg */
+        COLOR_RGB(230, 230, 235),  /* gutter_bg */
+        COLOR_RGB(140, 140, 150),  /* gutter_fg */
+        COLOR_RGB(0, 100, 200),    /* cursor_color */
+        COLOR_RGB(255, 220, 80),   /* highlight_bg */
+        COLOR_RGB(180, 180, 190),  /* btn_bg */
+        COLOR_RGB(20, 20, 20),     /* btn_fg */
+    },
+    { /* Retro Green */
+        "Retro",
+        COLOR_RGB(0, 10, 0),       /* text_bg */
+        COLOR_RGB(0, 220, 0),      /* text_fg */
+        COLOR_RGB(0, 30, 0),       /* toolbar_bg */
+        COLOR_RGB(0, 25, 0),       /* status_bg */
+        COLOR_RGB(0, 180, 0),      /* status_fg */
+        COLOR_RGB(0, 15, 0),       /* gutter_bg */
+        COLOR_RGB(0, 100, 0),      /* gutter_fg */
+        COLOR_RGB(0, 255, 0),      /* cursor_color */
+        COLOR_RGB(0, 80, 0),       /* highlight_bg */
+        COLOR_RGB(0, 50, 0),       /* btn_bg */
+        COLOR_RGB(0, 220, 0),      /* btn_fg */
+    },
+    { /* Ocean Blue */
+        "Ocean",
+        COLOR_RGB(10, 20, 40),     /* text_bg */
+        COLOR_RGB(180, 220, 255),  /* text_fg */
+        COLOR_RGB(20, 40, 70),     /* toolbar_bg */
+        COLOR_RGB(15, 30, 55),     /* status_bg */
+        COLOR_RGB(140, 180, 220),  /* status_fg */
+        COLOR_RGB(12, 25, 48),     /* gutter_bg */
+        COLOR_RGB(60, 100, 150),   /* gutter_fg */
+        COLOR_RGB(80, 180, 255),   /* cursor_color */
+        COLOR_RGB(60, 80, 30),     /* highlight_bg */
+        COLOR_RGB(30, 55, 90),     /* btn_bg */
+        COLOR_RGB(180, 220, 255),  /* btn_fg */
+    },
+};
+
+/* Color palette for custom color picker */
+#define PALETTE_COLS  8
+#define PALETTE_ROWS  4
+#define PALETTE_COUNT (PALETTE_COLS * PALETTE_ROWS)
+static const color_t palette[PALETTE_COUNT] = {
+    COLOR_RGB(0,0,0),       COLOR_RGB(40,40,40),    COLOR_RGB(80,80,80),    COLOR_RGB(128,128,128),
+    COLOR_RGB(180,180,180),  COLOR_RGB(220,220,220), COLOR_RGB(245,245,240), COLOR_RGB(255,255,255),
+    COLOR_RGB(180,0,0),     COLOR_RGB(255,60,60),   COLOR_RGB(220,120,0),   COLOR_RGB(255,180,0),
+    COLOR_RGB(200,200,0),   COLOR_RGB(255,255,80),  COLOR_RGB(0,160,0),     COLOR_RGB(0,220,0),
+    COLOR_RGB(0,160,160),   COLOR_RGB(0,220,220),   COLOR_RGB(0,80,200),    COLOR_RGB(80,140,255),
+    COLOR_RGB(100,0,200),   COLOR_RGB(180,80,255),  COLOR_RGB(200,0,120),   COLOR_RGB(255,80,180),
+    COLOR_RGB(0,10,0),      COLOR_RGB(10,20,40),    COLOR_RGB(20,20,28),    COLOR_RGB(30,30,38),
+    COLOR_RGB(245,245,240), COLOR_RGB(180,220,255), COLOR_RGB(0,220,0),     COLOR_RGB(100,200,255),
+};
 
 static int win_id = -1;
 static int mode = MODE_EDIT;
@@ -63,7 +147,47 @@ static bool file_dirty = false;
 static char input_buf[32];
 static int  input_len = 0;
 
-static const char *btn_labels[NP_BTN_COUNT] = { "New", "Open", "Save" };
+/* Theme/customization state */
+static int  current_theme = 0;
+static bool custom_colors = false;
+static color_t custom_text_fg = COLOR_WHITE;
+static color_t custom_text_bg = COLOR_RGB(20, 20, 28);
+
+/* Feature toggles */
+static bool show_line_numbers = false;
+static bool word_wrap = true;
+
+/* Find/replace state */
+static char find_buf[FIND_MAX + 1];
+static int  find_len = 0;
+static char replace_buf[REPLACE_MAX + 1];
+static int  replace_len = 0;
+static int  find_match_pos = -1;  /* position of current match in text_buf */
+static bool find_field_active = true; /* true = editing find, false = editing replace */
+
+/* Computed layout helpers */
+static int get_text_x(void) {
+    return TEXT_PAD + (show_line_numbers ? GUTTER_W : 0);
+}
+
+static int get_text_w(void) {
+    return NP_W - get_text_x() - TEXT_PAD;
+}
+
+static int get_max_cols(void) {
+    return get_text_w() / 8;
+}
+
+static int get_max_rows(void) {
+    int text_h = NP_H - HEADER_H - STATUS_H - 4;
+    return text_h / 16;
+}
+
+static const char *btn_labels_row1[ROW1_BTN_COUNT] = {
+    "New", "Open", "Save", "Find", "Theme", "Color", "Ln#", "Wrap"
+};
+
+/* ---- Drawing helpers ---- */
 
 static void np_rect(color_t *buf, int cw, int ch, int x, int y, int w, int h, color_t c) {
     for (int py = y; py < y + h && py < ch; py++) {
@@ -106,33 +230,125 @@ static void np_char_transparent(color_t *buf, int cw, int ch, int px, int py,
     }
 }
 
-/* Get line/col from cursor position */
+/* ---- Theme access ---- */
+
+static color_t theme_text_bg(void) {
+    if (custom_colors) return custom_text_bg;
+    return themes[current_theme].text_bg;
+}
+
+static color_t theme_text_fg(void) {
+    if (custom_colors) return custom_text_fg;
+    return themes[current_theme].text_fg;
+}
+
+static color_t theme_toolbar(void) {
+    return themes[current_theme].toolbar_bg;
+}
+
+static color_t theme_status_bg(void) {
+    return themes[current_theme].status_bg;
+}
+
+static color_t theme_status_fg(void) {
+    return themes[current_theme].status_fg;
+}
+
+static color_t theme_btn_bg(void) {
+    return themes[current_theme].btn_bg;
+}
+
+static color_t theme_btn_fg(void) {
+    return themes[current_theme].btn_fg;
+}
+
+static color_t theme_cursor(void) {
+    return themes[current_theme].cursor_color;
+}
+
+static color_t theme_gutter_bg(void) {
+    return themes[current_theme].gutter_bg;
+}
+
+static color_t theme_gutter_fg(void) {
+    return themes[current_theme].gutter_fg;
+}
+
+static color_t theme_highlight(void) {
+    return themes[current_theme].highlight_bg;
+}
+
+/* ---- Cursor / text helpers ---- */
+
 static void cursor_to_linecol(int pos, int *line, int *col) {
     int l = 0, c = 0;
+    int max_c = word_wrap ? get_max_cols() : 9999;
     for (int i = 0; i < pos && i < text_len; i++) {
         if (text_buf[i] == '\n') { l++; c = 0; }
-        else { c++; if (c >= MAX_COLS) { c = 0; l++; } }
+        else { c++; if (c >= max_c) { c = 0; l++; } }
     }
     *line = l;
     *col = c;
 }
 
-/* Get buffer position from line/col */
 static int linecol_to_pos(int target_line, int target_col) {
     int l = 0, c = 0;
+    int max_c = word_wrap ? get_max_cols() : 9999;
     for (int i = 0; i < text_len; i++) {
         if (l == target_line && c == target_col) return i;
         if (text_buf[i] == '\n') {
-            if (l == target_line) return i; /* col beyond line end */
+            if (l == target_line) return i;
             l++; c = 0;
         } else {
             c++;
-            if (c >= MAX_COLS) { c = 0; l++; }
+            if (c >= max_c) { c = 0; l++; }
         }
     }
-    if (l == target_line) return text_len;
     return text_len;
 }
+
+/* Count the "real" line number (newline-delimited) at a buffer position */
+static int real_line_at(int pos) {
+    int l = 1;
+    for (int i = 0; i < pos && i < text_len; i++)
+        if (text_buf[i] == '\n') l++;
+    return l;
+}
+
+static int count_words(void) {
+    int words = 0;
+    bool in_word = false;
+    for (int i = 0; i < text_len; i++) {
+        char c = text_buf[i];
+        bool ws = (c == ' ' || c == '\n' || c == '\t');
+        if (!ws && !in_word) { words++; in_word = true; }
+        if (ws) in_word = false;
+    }
+    return words;
+}
+
+static int count_lines_real(void) {
+    if (text_len == 0) return 1;
+    int lines = 1;
+    for (int i = 0; i < text_len; i++)
+        if (text_buf[i] == '\n') lines++;
+    return lines;
+}
+
+/* ---- int-to-string ---- */
+static void int_to_str(int n, char *buf) {
+    if (n == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+    bool neg = false;
+    if (n < 0) { neg = true; n = -n; }
+    char tmp[12]; int i = 0;
+    while (n > 0 && i < 11) { tmp[i++] = '0' + (n % 10); n /= 10; }
+    int j = 0;
+    if (neg) buf[j++] = '-';
+    while (--i >= 0) buf[j++] = tmp[i];
+    buf[j] = '\0';
+}
+
+/* ---- File operations ---- */
 
 static void np_new_file(void) {
     text_len = 0;
@@ -142,6 +358,7 @@ static void np_new_file(void) {
     filename[0] = '\0';
     filename_len = 0;
     file_dirty = false;
+    find_match_pos = -1;
 }
 
 static void np_open_file(const char *name) {
@@ -158,8 +375,8 @@ static void np_open_file(const char *name) {
     cursor_pos = 0;
     scroll_line = 0;
     file_dirty = false;
+    find_match_pos = -1;
 
-    /* Copy filename */
     int i = 0;
     while (name[i] && i < 31) { filename[i] = name[i]; i++; }
     filename[i] = '\0';
@@ -175,16 +392,16 @@ static void np_save_file(const char *name) {
     fs_write_file(idx, text_buf, (uint32_t)text_len);
     file_dirty = false;
 
-    /* Update filename */
     int i = 0;
     while (name[i] && i < 31) { filename[i] = name[i]; i++; }
     filename[i] = '\0';
     filename_len = i;
 }
 
+/* ---- Text editing ---- */
+
 static void insert_char(char c) {
     if (text_len >= BUF_SIZE) return;
-    /* Shift right */
     for (int i = text_len; i > cursor_pos; i--)
         text_buf[i] = text_buf[i - 1];
     text_buf[cursor_pos] = c;
@@ -209,8 +426,68 @@ static void ensure_cursor_visible(void) {
     (void)col;
     cursor_to_linecol(cursor_pos, &line, &col);
     if (line < scroll_line) scroll_line = line;
-    if (line >= scroll_line + MAX_ROWS) scroll_line = line - MAX_ROWS + 1;
+    if (line >= scroll_line + get_max_rows()) scroll_line = line - get_max_rows() + 1;
+    if (scroll_line < 0) scroll_line = 0;
 }
+
+/* ---- Find/replace ---- */
+
+static bool str_match_at(int pos) {
+    if (find_len == 0) return false;
+    for (int i = 0; i < find_len; i++) {
+        if (pos + i >= text_len) return false;
+        /* Case-insensitive comparison */
+        char a = text_buf[pos + i];
+        char b = find_buf[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return false;
+    }
+    return true;
+}
+
+static void find_next(void) {
+    if (find_len == 0) { find_match_pos = -1; return; }
+    int start = (find_match_pos >= 0) ? find_match_pos + 1 : 0;
+    /* Search from start to end */
+    for (int i = start; i <= text_len - find_len; i++) {
+        if (str_match_at(i)) { find_match_pos = i; cursor_pos = i; ensure_cursor_visible(); return; }
+    }
+    /* Wrap around */
+    for (int i = 0; i < start && i <= text_len - find_len; i++) {
+        if (str_match_at(i)) { find_match_pos = i; cursor_pos = i; ensure_cursor_visible(); return; }
+    }
+    find_match_pos = -1;
+}
+
+static void replace_current(void) {
+    if (find_match_pos < 0 || find_len == 0) return;
+    /* Delete find_len chars at find_match_pos */
+    int diff = replace_len - find_len;
+    if (text_len + diff > BUF_SIZE) return;
+
+    if (diff > 0) {
+        /* Shift right */
+        for (int i = text_len - 1; i >= find_match_pos + find_len; i--)
+            text_buf[i + diff] = text_buf[i];
+    } else if (diff < 0) {
+        /* Shift left */
+        for (int i = find_match_pos + find_len; i < text_len; i++)
+            text_buf[i + diff] = text_buf[i];
+    }
+    /* Copy replacement */
+    for (int i = 0; i < replace_len; i++)
+        text_buf[find_match_pos + i] = replace_buf[i];
+
+    text_len += diff;
+    text_buf[text_len] = '\0';
+    file_dirty = true;
+    cursor_pos = find_match_pos + replace_len;
+    find_match_pos = -1;
+    find_next(); /* Find the next occurrence */
+}
+
+/* ---- Event handler ---- */
 
 static void np_on_event(struct window *win, struct gui_event *evt) {
     (void)win;
@@ -218,7 +495,26 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
     if (evt->type == EVT_KEY_PRESS) {
         uint8_t k = evt->key;
 
-        /* Dialog modes */
+        /* Ctrl+F → find */
+        if (k == 6) {
+            mode = MODE_FIND;
+            find_field_active = true;
+            return;
+        }
+        /* Ctrl+S → quick save */
+        if (k == 19) {
+            if (filename_len > 0) np_save_file(filename);
+            else { input_len = 0; mode = MODE_SAVE; }
+            return;
+        }
+        /* Ctrl+N → new file */
+        if (k == 14) {
+            np_new_file();
+            mode = MODE_EDIT;
+            return;
+        }
+
+        /* Open/Save dialog input */
         if (mode == MODE_OPEN || mode == MODE_SAVE) {
             if (k == 0x1B) { mode = MODE_EDIT; return; }
             if (k == '\n') {
@@ -237,47 +533,101 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
             return;
         }
 
+        /* Find/replace mode */
+        if (mode == MODE_FIND) {
+            if (k == 0x1B) { mode = MODE_EDIT; return; }
+            if (k == '\t') { find_field_active = !find_field_active; return; }
+            if (k == '\n') {
+                if (find_field_active) {
+                    find_buf[find_len] = '\0';
+                    find_next();
+                } else {
+                    replace_buf[replace_len] = '\0';
+                    replace_current();
+                }
+                return;
+            }
+            if (k == '\b') {
+                if (find_field_active) { if (find_len > 0) find_len--; find_match_pos = -1; }
+                else { if (replace_len > 0) replace_len--; }
+                return;
+            }
+            if (k >= 0x20 && k < 0x80) {
+                if (find_field_active && find_len < FIND_MAX) {
+                    find_buf[find_len++] = (char)k;
+                    find_match_pos = -1;
+                } else if (!find_field_active && replace_len < REPLACE_MAX) {
+                    replace_buf[replace_len++] = (char)k;
+                }
+            }
+            return;
+        }
+
+        /* Color picker mode - Esc to exit */
+        if (mode == MODE_COLOR) {
+            if (k == 0x1B) { mode = MODE_EDIT; return; }
+            return;
+        }
+
         /* Normal edit mode */
         if (k == '\b') { delete_char_back(); ensure_cursor_visible(); return; }
         if (k == '\n') { insert_char('\n'); ensure_cursor_visible(); return; }
 
         if (k == KEY_LEFT) {
             if (cursor_pos > 0) cursor_pos--;
-            ensure_cursor_visible();
-            return;
+            ensure_cursor_visible(); return;
         }
         if (k == KEY_RIGHT) {
             if (cursor_pos < text_len) cursor_pos++;
-            ensure_cursor_visible();
-            return;
+            ensure_cursor_visible(); return;
         }
         if (k == KEY_UP) {
             int line, col;
             cursor_to_linecol(cursor_pos, &line, &col);
             if (line > 0) cursor_pos = linecol_to_pos(line - 1, col);
-            ensure_cursor_visible();
-            return;
+            ensure_cursor_visible(); return;
         }
         if (k == KEY_DOWN) {
             int line, col;
             cursor_to_linecol(cursor_pos, &line, &col);
             cursor_pos = linecol_to_pos(line + 1, col);
             if (cursor_pos > text_len) cursor_pos = text_len;
-            ensure_cursor_visible();
-            return;
+            ensure_cursor_visible(); return;
         }
         if (k == KEY_HOME) {
-            /* Go to start of current line */
             while (cursor_pos > 0 && text_buf[cursor_pos - 1] != '\n')
                 cursor_pos--;
-            ensure_cursor_visible();
-            return;
+            ensure_cursor_visible(); return;
         }
         if (k == KEY_END) {
-            /* Go to end of current line */
             while (cursor_pos < text_len && text_buf[cursor_pos] != '\n')
                 cursor_pos++;
-            ensure_cursor_visible();
+            ensure_cursor_visible(); return;
+        }
+        if (k == KEY_PGUP) {
+            int rows = get_max_rows();
+            int line, col;
+            cursor_to_linecol(cursor_pos, &line, &col);
+            if (line > rows) cursor_pos = linecol_to_pos(line - rows, col);
+            else cursor_pos = linecol_to_pos(0, col);
+            ensure_cursor_visible(); return;
+        }
+        if (k == KEY_PGDN) {
+            int rows = get_max_rows();
+            int line, col;
+            cursor_to_linecol(cursor_pos, &line, &col);
+            cursor_pos = linecol_to_pos(line + rows, col);
+            if (cursor_pos > text_len) cursor_pos = text_len;
+            ensure_cursor_visible(); return;
+        }
+        if (k == KEY_DELETE) {
+            if (cursor_pos < text_len) {
+                for (int i = cursor_pos; i < text_len - 1; i++)
+                    text_buf[i] = text_buf[i + 1];
+                text_len--;
+                text_buf[text_len] = '\0';
+                file_dirty = true;
+            }
             return;
         }
 
@@ -293,34 +643,91 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
         int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
         int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
 
-        /* Toolbar buttons */
-        if (my >= 3 && my < 3 + NP_BTN_H) {
-            for (int i = 0; i < NP_BTN_COUNT; i++) {
-                int bx = 4 + i * (NP_BTN_W + NP_BTN_GAP);
-                if (mx >= bx && mx < bx + NP_BTN_W) {
-                    if (i == 0) { /* New */
-                        np_new_file();
-                    } else if (i == 1) { /* Open */
-                        input_len = 0;
-                        mode = MODE_OPEN;
-                    } else if (i == 2) { /* Save */
-                        if (filename_len > 0) {
-                            np_save_file(filename);
-                        } else {
-                            input_len = 0;
-                            mode = MODE_SAVE;
-                        }
+        /* Row 1 toolbar buttons */
+        if (my >= 3 && my < 3 + BTN_H) {
+            for (int i = 0; i < ROW1_BTN_COUNT; i++) {
+                int bx = 4 + i * (BTN_W + BTN_GAP);
+                if (mx >= bx && mx < bx + BTN_W) {
+                    switch (i) {
+                    case 0: /* New */
+                        np_new_file(); mode = MODE_EDIT; break;
+                    case 1: /* Open */
+                        input_len = 0; mode = MODE_OPEN; break;
+                    case 2: /* Save */
+                        if (filename_len > 0) np_save_file(filename);
+                        else { input_len = 0; mode = MODE_SAVE; }
+                        break;
+                    case 3: /* Find */
+                        mode = MODE_FIND; find_field_active = true; break;
+                    case 4: /* Theme */
+                        current_theme = (current_theme + 1) % THEME_COUNT;
+                        custom_colors = false;
+                        break;
+                    case 5: /* Color */
+                        mode = (mode == MODE_COLOR) ? MODE_EDIT : MODE_COLOR;
+                        break;
+                    case 6: /* Ln# */
+                        show_line_numbers = !show_line_numbers; break;
+                    case 7: /* Wrap */
+                        word_wrap = !word_wrap; break;
                     }
                     return;
                 }
             }
         }
 
+        /* Row 2 (theme info bar) - nothing clickable, but check if in color picker */
+        if (mode == MODE_COLOR) {
+            /* Color picker area */
+            int cp_y = HEADER_H + 2;
+            int cp_x = TEXT_PAD;
+            int swatch = 20;
+            int gap = 2;
+
+            /* "Text:" label area */
+            int label_h = 18;
+            int fg_grid_y = cp_y + label_h;
+            int bg_label_y = fg_grid_y + PALETTE_ROWS * (swatch + gap) + 8;
+            int bg_grid_y = bg_label_y + label_h;
+
+            /* Check FG palette click */
+            if (my >= fg_grid_y && my < fg_grid_y + PALETTE_ROWS * (swatch + gap)) {
+                int row = (my - fg_grid_y) / (swatch + gap);
+                int col = (mx - cp_x) / (swatch + gap);
+                if (col >= 0 && col < PALETTE_COLS && row >= 0 && row < PALETTE_ROWS) {
+                    int idx = row * PALETTE_COLS + col;
+                    if (idx < PALETTE_COUNT) {
+                        custom_text_fg = palette[idx];
+                        custom_colors = true;
+                    }
+                }
+                return;
+            }
+
+            /* Check BG palette click */
+            if (my >= bg_grid_y && my < bg_grid_y + PALETTE_ROWS * (swatch + gap)) {
+                int row = (my - bg_grid_y) / (swatch + gap);
+                int col = (mx - cp_x) / (swatch + gap);
+                if (col >= 0 && col < PALETTE_COLS && row >= 0 && row < PALETTE_ROWS) {
+                    int idx = row * PALETTE_COLS + col;
+                    if (idx < PALETTE_COUNT) {
+                        custom_text_bg = palette[idx];
+                        custom_colors = true;
+                    }
+                }
+                return;
+            }
+            return;
+        }
+
         /* Text area click - position cursor */
-        if (mx >= TEXT_X && mx < TEXT_X + TEXT_W &&
-            my >= TEXT_Y && my < TEXT_Y + TEXT_H) {
-            int click_col = (mx - TEXT_X) / 8;
-            int click_row = (my - TEXT_Y) / 16 + scroll_line;
+        int text_x = get_text_x();
+        int text_y_start = HEADER_H + 2;
+        int text_h = NP_H - HEADER_H - STATUS_H - 4;
+        if (mx >= text_x && mx < text_x + get_text_w() &&
+            my >= text_y_start && my < text_y_start + text_h) {
+            int click_col = (mx - text_x) / 8;
+            int click_row = (my - text_y_start) / 16 + scroll_line;
             int pos = linecol_to_pos(click_row, click_col);
             if (pos <= text_len) cursor_pos = pos;
         }
@@ -332,9 +739,10 @@ void notepad_create(void) {
         struct window *w = wm_get_window(win_id);
         if (w && w->alive) { wm_focus_window(win_id); return; }
     }
-    win_id = wm_create_window("Notepad", 100, 60, NP_W, NP_H,
+    win_id = wm_create_window("Notepad", 80, 50, NP_W, NP_H,
                                np_on_event, NULL);
     np_new_file();
+    mode = MODE_EDIT;
 }
 
 bool notepad_is_alive(void) {
@@ -353,129 +761,275 @@ void notepad_render(void) {
     color_t *buf = win->content;
 
     /* Background */
-    for (int i = 0; i < cw * ch; i++) buf[i] = C_BG;
+    color_t bg = theme_text_bg();
+    for (int i = 0; i < cw * ch; i++) buf[i] = bg;
 
-    /* Toolbar */
-    np_rect(buf, cw, ch, 0, 0, cw, TOOLBAR_H, C_TOOLBAR);
-    for (int i = 0; i < NP_BTN_COUNT; i++) {
-        int bx = 4 + i * (NP_BTN_W + NP_BTN_GAP);
-        np_rect(buf, cw, ch, bx, 3, NP_BTN_W, NP_BTN_H, C_BTN);
-        int llen = str_len(btn_labels[i]);
-        int lx = bx + (NP_BTN_W - llen * 8) / 2;
-        np_text(buf, cw, ch, lx, 4, btn_labels[i], C_BTN_TEXT, C_BTN);
+    /* Toolbar row 1 */
+    np_rect(buf, cw, ch, 0, 0, cw, TOOLBAR_H, theme_toolbar());
+    for (int i = 0; i < ROW1_BTN_COUNT; i++) {
+        int bx = 4 + i * (BTN_W + BTN_GAP);
+        color_t btn_c = theme_btn_bg();
+        /* Highlight active toggle buttons */
+        if (i == 6 && show_line_numbers) btn_c = COLOR_RGB(40, 120, 60);
+        if (i == 7 && word_wrap) btn_c = COLOR_RGB(40, 120, 60);
+        np_rect(buf, cw, ch, bx, 3, BTN_W, BTN_H, btn_c);
+        int llen = str_len(btn_labels_row1[i]);
+        int lx = bx + (BTN_W - llen * 8) / 2;
+        np_text(buf, cw, ch, lx, 4, btn_labels_row1[i], theme_btn_fg(), btn_c);
     }
 
-    /* Filename in toolbar */
+    /* Toolbar row 2 - info bar */
+    np_rect(buf, cw, ch, 0, TOOLBAR2_Y, cw, TOOLBAR2_H, theme_toolbar());
+
+    /* Show filename and theme name */
+    int ix = 4;
     if (filename_len > 0) {
-        int fx = 4 + NP_BTN_COUNT * (NP_BTN_W + NP_BTN_GAP) + 8;
-        np_text(buf, cw, ch, fx, 4, filename, COLOR_YELLOW, C_TOOLBAR);
+        np_text(buf, cw, ch, ix, TOOLBAR2_Y + 3, filename, COLOR_YELLOW, theme_toolbar());
+        ix += filename_len * 8;
         if (file_dirty) {
-            np_text(buf, cw, ch, fx + filename_len * 8, 4, "*", COLOR_RED, C_TOOLBAR);
+            np_text(buf, cw, ch, ix, TOOLBAR2_Y + 3, " *", COLOR_RED, theme_toolbar());
+            ix += 16;
         }
+        ix += 16;
+    } else {
+        np_text(buf, cw, ch, ix, TOOLBAR2_Y + 3, "untitled", COLOR_RGB(120,120,120), theme_toolbar());
+        ix += 8 * 8 + 16;
     }
 
-    /* Text area background */
-    np_rect(buf, cw, ch, 0, TEXT_Y, NP_W, TEXT_H, C_TEXT_BG);
+    /* Theme indicator */
+    np_text(buf, cw, ch, ix, TOOLBAR2_Y + 3, "[", theme_status_fg(), theme_toolbar());
+    ix += 8;
+    const char *tname = custom_colors ? "Custom" : themes[current_theme].name;
+    np_text(buf, cw, ch, ix, TOOLBAR2_Y + 3, tname, theme_cursor(), theme_toolbar());
+    ix += str_len(tname) * 8;
+    np_text(buf, cw, ch, ix, TOOLBAR2_Y + 3, "]", theme_status_fg(), theme_toolbar());
 
-    /* Render text */
-    int line = 0, col = 0;
-    int cur_line = -1, cur_col = -1;
-    cursor_to_linecol(cursor_pos, &cur_line, &cur_col);
+    /* Color picker panel */
+    if (mode == MODE_COLOR) {
+        int cp_y = HEADER_H + 2;
+        int cp_x = TEXT_PAD;
+        int swatch = 20;
+        int gap = 2;
 
-    for (int i = 0; i < text_len; i++) {
-        /* Draw character if visible */
-        if (line >= scroll_line && line < scroll_line + MAX_ROWS) {
-            int screen_row = line - scroll_line;
-            int px = TEXT_X + col * 8;
-            int py = TEXT_Y + screen_row * 16;
+        /* Background for color picker area */
+        np_rect(buf, cw, ch, 0, HEADER_H, cw, NP_H - HEADER_H - STATUS_H, theme_toolbar());
 
-            if (text_buf[i] != '\n') {
-                np_char_transparent(buf, cw, ch, px, py, text_buf[i], C_TEXT_FG);
+        np_text(buf, cw, ch, cp_x, cp_y, "Text Color:", theme_text_fg(), theme_toolbar());
+        int fg_grid_y = cp_y + 18;
+        for (int r = 0; r < PALETTE_ROWS; r++) {
+            for (int c = 0; c < PALETTE_COLS; c++) {
+                int idx = r * PALETTE_COLS + c;
+                int sx = cp_x + c * (swatch + gap);
+                int sy = fg_grid_y + r * (swatch + gap);
+                np_rect(buf, cw, ch, sx, sy, swatch, swatch, palette[idx]);
+                /* Highlight if selected */
+                if (custom_colors && palette[idx] == custom_text_fg) {
+                    np_rect(buf, cw, ch, sx, sy, swatch, 1, COLOR_WHITE);
+                    np_rect(buf, cw, ch, sx, sy + swatch - 1, swatch, 1, COLOR_WHITE);
+                    np_rect(buf, cw, ch, sx, sy, 1, swatch, COLOR_WHITE);
+                    np_rect(buf, cw, ch, sx + swatch - 1, sy, 1, swatch, COLOR_WHITE);
+                }
             }
         }
 
-        if (text_buf[i] == '\n') { line++; col = 0; }
-        else { col++; if (col >= MAX_COLS) { col = 0; line++; } }
-    }
+        int bg_label_y = fg_grid_y + PALETTE_ROWS * (swatch + gap) + 8;
+        np_text(buf, cw, ch, cp_x, bg_label_y, "Background:", theme_text_fg(), theme_toolbar());
+        int bg_grid_y = bg_label_y + 18;
+        for (int r = 0; r < PALETTE_ROWS; r++) {
+            for (int c = 0; c < PALETTE_COLS; c++) {
+                int idx = r * PALETTE_COLS + c;
+                int sx = cp_x + c * (swatch + gap);
+                int sy = bg_grid_y + r * (swatch + gap);
+                np_rect(buf, cw, ch, sx, sy, swatch, swatch, palette[idx]);
+                if (custom_colors && palette[idx] == custom_text_bg) {
+                    np_rect(buf, cw, ch, sx, sy, swatch, 1, COLOR_WHITE);
+                    np_rect(buf, cw, ch, sx, sy + swatch - 1, swatch, 1, COLOR_WHITE);
+                    np_rect(buf, cw, ch, sx, sy, 1, swatch, COLOR_WHITE);
+                    np_rect(buf, cw, ch, sx + swatch - 1, sy, 1, swatch, COLOR_WHITE);
+                }
+            }
+        }
 
-    /* Blinking cursor */
-    if (mode == MODE_EDIT && (timer_get_ticks() / 40) & 1) {
-        if (cur_line >= scroll_line && cur_line < scroll_line + MAX_ROWS) {
-            int screen_row = cur_line - scroll_line;
-            int cx = TEXT_X + cur_col * 8;
-            int cy = TEXT_Y + screen_row * 16;
-            np_rect(buf, cw, ch, cx, cy, 2, 16, C_CURSOR);
+        /* Preview area */
+        int pv_x = cp_x + PALETTE_COLS * (swatch + gap) + 16;
+        int pv_y = cp_y + 18;
+        np_text(buf, cw, ch, pv_x, cp_y, "Preview:", theme_status_fg(), theme_toolbar());
+        np_rect(buf, cw, ch, pv_x, pv_y, 140, 48, theme_text_bg());
+        np_text(buf, cw, ch, pv_x + 4, pv_y + 4, "Hello World", theme_text_fg(), theme_text_bg());
+        np_text(buf, cw, ch, pv_x + 4, pv_y + 20, "Sample text", theme_text_fg(), theme_text_bg());
+
+        np_text(buf, cw, ch, pv_x, pv_y + 60, "Esc to close", theme_status_fg(), theme_toolbar());
+
+    } else {
+        /* Normal text area */
+        int text_x = get_text_x();
+        int text_y = HEADER_H + 2;
+        int text_area_h = NP_H - HEADER_H - STATUS_H - 4;
+        int max_rows = get_max_rows();
+        int max_cols = get_max_cols();
+
+        /* Text area background */
+        np_rect(buf, cw, ch, 0, HEADER_H, cw, text_area_h + 4, theme_text_bg());
+
+        /* Line number gutter */
+        if (show_line_numbers) {
+            np_rect(buf, cw, ch, 0, HEADER_H, GUTTER_W, text_area_h + 4, theme_gutter_bg());
+            /* Separator line */
+            np_rect(buf, cw, ch, GUTTER_W - 1, HEADER_H, 1, text_area_h + 4,
+                    theme_gutter_fg());
+        }
+
+        /* Render text with optional line numbers */
+        int line = 0, col = 0;
+        int cur_line = -1, cur_col = -1;
+        cursor_to_linecol(cursor_pos, &cur_line, &cur_col);
+
+        /* Track real line numbers for the gutter */
+        int real_ln = 1;
+        int last_drawn_real_ln = -1;
+
+        for (int i = 0; i <= text_len; i++) {
+            /* Draw line number at start of each visible screen line */
+            if (show_line_numbers && col == 0 && line >= scroll_line && line < scroll_line + max_rows) {
+                int screen_row = line - scroll_line;
+                /* Only draw the line number once per real line */
+                if (real_ln != last_drawn_real_ln) {
+                    char lnbuf[6];
+                    int_to_str(real_ln, lnbuf);
+                    int lnlen = str_len(lnbuf);
+                    /* Right-align in gutter */
+                    int gx = GUTTER_W - 6 - lnlen * 8;
+                    if (gx < 2) gx = 2;
+                    np_text(buf, cw, ch, gx, text_y + screen_row * 16,
+                            lnbuf, theme_gutter_fg(), theme_gutter_bg());
+                    last_drawn_real_ln = real_ln;
+                }
+            }
+
+            if (i == text_len) break;
+
+            /* Draw character if visible */
+            if (line >= scroll_line && line < scroll_line + max_rows) {
+                int screen_row = line - scroll_line;
+                int px = text_x + col * 8;
+                int py = text_y + screen_row * 16;
+
+                /* Check if this position is part of a find match */
+                bool in_match = false;
+                if (find_match_pos >= 0 && find_len > 0 &&
+                    i >= find_match_pos && i < find_match_pos + find_len) {
+                    in_match = true;
+                }
+
+                if (text_buf[i] != '\n') {
+                    if (in_match) {
+                        /* Highlight match */
+                        np_rect(buf, cw, ch, px, py, 8, 16, theme_highlight());
+                        np_char_transparent(buf, cw, ch, px, py, text_buf[i], theme_text_fg());
+                    } else {
+                        np_char_transparent(buf, cw, ch, px, py, text_buf[i], theme_text_fg());
+                    }
+                }
+            }
+
+            if (text_buf[i] == '\n') {
+                line++; col = 0; real_ln++;
+            } else {
+                col++;
+                if (word_wrap && col >= max_cols) { col = 0; line++; }
+            }
+        }
+
+        /* Blinking cursor */
+        if (mode == MODE_EDIT && (timer_get_ticks() / 40) & 1) {
+            if (cur_line >= scroll_line && cur_line < scroll_line + max_rows) {
+                int screen_row = cur_line - scroll_line;
+                int cx = text_x + cur_col * 8;
+                int cy = text_y + screen_row * 16;
+                np_rect(buf, cw, ch, cx, cy, 2, 16, theme_cursor());
+            }
         }
     }
 
     /* Status bar */
-    np_rect(buf, cw, ch, 0, NP_H - STATUS_H, NP_W, STATUS_H, C_STATUS_BG);
+    np_rect(buf, cw, ch, 0, NP_H - STATUS_H, NP_W, STATUS_H, theme_status_bg());
 
     if (mode == MODE_OPEN || mode == MODE_SAVE) {
         const char *prompt = (mode == MODE_OPEN) ? "Open: " : "Save as: ";
-        np_text(buf, cw, ch, 4, NP_H - STATUS_H + 2, prompt, COLOR_YELLOW, C_STATUS_BG);
+        np_text(buf, cw, ch, 4, NP_H - STATUS_H + 2, prompt, COLOR_YELLOW, theme_status_bg());
         input_buf[input_len] = '\0';
         int px = 4 + str_len(prompt) * 8;
-        np_text(buf, cw, ch, px, NP_H - STATUS_H + 2, input_buf, COLOR_WHITE, C_STATUS_BG);
-        /* Input cursor */
+        np_text(buf, cw, ch, px, NP_H - STATUS_H + 2, input_buf, COLOR_WHITE, theme_status_bg());
         if ((timer_get_ticks() / 40) & 1)
-            np_rect(buf, cw, ch, px + input_len * 8, NP_H - STATUS_H + 2, 8, 16, C_CURSOR);
+            np_rect(buf, cw, ch, px + input_len * 8, NP_H - STATUS_H + 2, 8, 16, theme_cursor());
+    } else if (mode == MODE_FIND) {
+        /* Find/replace bar */
+        int fy = NP_H - STATUS_H + 2;
+        find_buf[find_len] = '\0';
+        replace_buf[replace_len] = '\0';
+
+        /* Find field */
+        color_t find_label_c = find_field_active ? COLOR_YELLOW : theme_status_fg();
+        np_text(buf, cw, ch, 4, fy, "F:", find_label_c, theme_status_bg());
+        np_text(buf, cw, ch, 24, fy, find_buf, COLOR_WHITE, theme_status_bg());
+        if (find_field_active && (timer_get_ticks() / 40) & 1)
+            np_rect(buf, cw, ch, 24 + find_len * 8, fy, 8, 16, theme_cursor());
+
+        /* Replace field */
+        int rx = 24 + (FIND_MAX > 16 ? 16 : FIND_MAX) * 8 + 16;
+        if (rx > 200) rx = 200;
+        color_t rep_label_c = !find_field_active ? COLOR_YELLOW : theme_status_fg();
+        np_text(buf, cw, ch, rx, fy, "R:", rep_label_c, theme_status_bg());
+        np_text(buf, cw, ch, rx + 20, fy, replace_buf, COLOR_WHITE, theme_status_bg());
+        if (!find_field_active && (timer_get_ticks() / 40) & 1)
+            np_rect(buf, cw, ch, rx + 20 + replace_len * 8, fy, 8, 16, theme_cursor());
+
+        /* Tab hint */
+        np_text(buf, cw, ch, NP_W - 80, fy, "Tab=swap", COLOR_RGB(100,100,100), theme_status_bg());
     } else {
-        /* Line:Col indicator */
-        char status[48];
-        char num1[12], num2[12], num3[12];
+        /* Normal status: Ln X Col Y | W words Z chars */
+        int cur_line, cur_col;
+        cursor_to_linecol(cursor_pos, &cur_line, &cur_col);
 
-        /* Build "Ln X Col Y | Z chars" manually */
+        char status[64];
         int si = 0;
+        char nbuf[12];
+
+        /* Ln */
         status[si++] = 'L'; status[si++] = 'n'; status[si++] = ' ';
+        int_to_str(real_line_at(cursor_pos), nbuf);
+        for (int i = 0; nbuf[i]; i++) status[si++] = nbuf[i];
 
-        /* Line number */
-        int ln = cur_line + 1;
-        if (ln == 0) { num1[0] = '0'; num1[1] = '\0'; }
-        else {
-            char tmp[12]; int ti = 0;
-            int v = ln;
-            while (v > 0) { tmp[ti++] = '0' + (v % 10); v /= 10; }
-            int ni = 0;
-            while (--ti >= 0) num1[ni++] = tmp[ti];
-            num1[ni] = '\0';
-        }
-        for (int i = 0; num1[i]; i++) status[si++] = num1[i];
-
+        /* Col */
         status[si++] = ' '; status[si++] = 'C'; status[si++] = 'o';
         status[si++] = 'l'; status[si++] = ' ';
-
-        /* Col number */
-        int cn = cur_col + 1;
-        if (cn == 0) { num2[0] = '0'; num2[1] = '\0'; }
-        else {
-            char tmp[12]; int ti = 0;
-            int v = cn;
-            while (v > 0) { tmp[ti++] = '0' + (v % 10); v /= 10; }
-            int ni = 0;
-            while (--ti >= 0) num2[ni++] = tmp[ti];
-            num2[ni] = '\0';
-        }
-        for (int i = 0; num2[i]; i++) status[si++] = num2[i];
+        int_to_str(cur_col + 1, nbuf);
+        for (int i = 0; nbuf[i]; i++) status[si++] = nbuf[i];
 
         status[si++] = ' '; status[si++] = '|'; status[si++] = ' ';
 
-        /* Char count */
-        if (text_len == 0) { num3[0] = '0'; num3[1] = '\0'; }
-        else {
-            char tmp[12]; int ti = 0;
-            int v = text_len;
-            while (v > 0) { tmp[ti++] = '0' + (v % 10); v /= 10; }
-            int ni = 0;
-            while (--ti >= 0) num3[ni++] = tmp[ti];
-            num3[ni] = '\0';
-        }
-        for (int i = 0; num3[i]; i++) status[si++] = num3[i];
+        /* Words */
+        int_to_str(count_words(), nbuf);
+        for (int i = 0; nbuf[i]; i++) status[si++] = nbuf[i];
+        status[si++] = ' '; status[si++] = 'w'; status[si++] = 'o';
+        status[si++] = 'r'; status[si++] = 'd'; status[si++] = 's';
 
+        status[si++] = ' ';
+
+        /* Lines */
+        int_to_str(count_lines_real(), nbuf);
+        for (int i = 0; nbuf[i]; i++) status[si++] = nbuf[i];
+        status[si++] = ' '; status[si++] = 'l'; status[si++] = 'n';
+        status[si++] = 's';
+
+        status[si++] = ' ';
+
+        /* Chars */
+        int_to_str(text_len, nbuf);
+        for (int i = 0; nbuf[i]; i++) status[si++] = nbuf[i];
         status[si++] = ' '; status[si++] = 'c'; status[si++] = 'h';
-        status[si++] = 'a'; status[si++] = 'r'; status[si++] = 's';
         status[si] = '\0';
 
-        np_text(buf, cw, ch, 4, NP_H - STATUS_H + 2, status, C_STATUS_FG, C_STATUS_BG);
+        np_text(buf, cw, ch, 4, NP_H - STATUS_H + 2, status, theme_status_fg(), theme_status_bg());
     }
 }

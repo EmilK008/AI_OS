@@ -1,0 +1,14 @@
+apps/notepad.c:201:13:np_text	52	static
+apps/notepad.c:219:13:np_char_transparent	44	static
+apps/notepad.c:283:13:cursor_to_linecol	24	static
+apps/notepad.c:294:12:linecol_to_pos	20	static
+apps/notepad.c:403:13:insert_char	12	static
+apps/notepad.c:424:13:ensure_cursor_visible	20	static
+apps/notepad.c:435:13:str_match_at	20	static
+apps/notepad.c:449:13:find_next	20	static
+apps/notepad.c:339:13:int_to_str.part.0	40	static
+apps/notepad.c:386:13:np_save_file	32	static
+apps/notepad.c:492:13:np_on_event	80	static
+apps/notepad.c:737:6:notepad_create	48	static
+apps/notepad.c:748:6:notepad_is_alive	48	static
+apps/notepad.c:754:6:notepad_render	304	static
