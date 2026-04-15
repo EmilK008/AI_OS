@@ -247,29 +247,14 @@ int fb_get_width(void)  { return (int)screen_width; }
 int fb_get_height(void) { return (int)screen_height; }
 color_t *fb_get_backbuf(void) { return backbuf; }
 
-/* Debug output helpers for fb_set_mode */
-static void fb_dbg_putc(char c) {
-    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)c), "Nd"((uint16_t)0xE9));
-}
-static void fb_dbg_print(const char *s) { while (*s) fb_dbg_putc(*s++); }
-static void fb_dbg_dec(int v) {
-    if (v < 0) { fb_dbg_putc('-'); v = -v; }
-    if (v == 0) { fb_dbg_putc('0'); return; }
-    char tmp[12]; int i = 0;
-    while (v > 0) { tmp[i++] = '0' + (v % 10); v /= 10; }
-    while (i > 0) fb_dbg_putc(tmp[--i]);
-}
-
 bool fb_set_mode(int width, int height) {
-    fb_dbg_print("FB: set_mode "); fb_dbg_dec(width); fb_dbg_putc('x'); fb_dbg_dec(height); fb_dbg_putc('\n');
-    if (!initialized) { fb_dbg_print("FB: not init\n"); return false; }
-    if (width == (int)screen_width && height == (int)screen_height) { fb_dbg_print("FB: same mode\n"); return true; }
+    if (!initialized) return false;
+    if (width == (int)screen_width && height == (int)screen_height) return true;
 
     /* Allocate new back buffer before touching hardware */
     uint32_t new_size = (uint32_t)width * (uint32_t)height * sizeof(color_t);
-    fb_dbg_print("FB: alloc "); fb_dbg_dec((int)new_size); fb_dbg_putc('\n');
     color_t *new_buf = (color_t *)kmalloc(new_size);
-    if (!new_buf) { fb_dbg_print("FB: alloc FAIL\n"); return false; }
+    if (!new_buf) return false;
     mem_set(new_buf, 0, new_size);
 
     /* Reprogram BGA hardware */

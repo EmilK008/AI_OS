@@ -14,19 +14,6 @@
 #include "fs.h"
 #include "keyboard.h"
 
-/* Debug output via QEMU port 0xE9 */
-static void s_dbg_putc(char c) {
-    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)c), "Nd"((uint16_t)0xE9));
-}
-static void s_dbg_print(const char *s) { while (*s) s_dbg_putc(*s++); }
-static void s_dbg_dec(int v) {
-    if (v < 0) { s_dbg_putc('-'); v = -v; }
-    if (v == 0) { s_dbg_putc('0'); return; }
-    char tmp[12]; int i = 0;
-    while (v > 0) { tmp[i++] = '0' + (v % 10); v /= 10; }
-    while (i > 0) s_dbg_putc(tmp[--i]);
-}
-
 #define SET_W        340
 #define SET_H        280
 #define SIDEBAR_W    80
@@ -273,17 +260,9 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
             int rbtn_w = 72;
             int rbtn_h = 22;
             int rbtn_gap = 6;
-            s_dbg_print("SET: disp click px="); s_dbg_dec(px);
-            s_dbg_print(" py="); s_dbg_dec(py);
-            s_dbg_print(" res_y="); s_dbg_dec(res_y);
-            s_dbg_putc('\n');
             for (int i = 0; i < RES_COUNT; i++) {
                 int bx = 12 + i * (rbtn_w + rbtn_gap);
                 if (px >= bx && px < bx + rbtn_w && py >= res_y && py < res_y + rbtn_h) {
-                    s_dbg_print("SET: res btn "); s_dbg_dec(i);
-                    s_dbg_print(" -> "); s_dbg_dec(res_widths[i]);
-                    s_dbg_putc('x'); s_dbg_dec(res_heights[i]);
-                    s_dbg_putc('\n');
                     if (fb_set_mode(res_widths[i], res_heights[i])) {
                         mouse_set_bounds(fb_get_width(), fb_get_height());
                         mouse_clamp();

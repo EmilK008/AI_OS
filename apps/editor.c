@@ -205,10 +205,10 @@ static void editor_delete_char(void) {
 
 static void editor_save(void) {
     /* Build file content from lines */
-    char buf[MAX_FILE_DATA];
+    char buf[MAX_TEXT_DATA];
     int pos = 0;
-    for (int i = 0; i < line_count && pos < MAX_FILE_DATA - 2; i++) {
-        for (int j = 0; lines[i][j] && pos < MAX_FILE_DATA - 2; j++) {
+    for (int i = 0; i < line_count && pos < MAX_TEXT_DATA - 2; i++) {
+        for (int j = 0; lines[i][j] && pos < MAX_TEXT_DATA - 2; j++) {
             buf[pos++] = lines[i][j];
         }
         if (i < line_count - 1) {
@@ -237,8 +237,8 @@ static void editor_load(void) {
 
     if (file_idx < 0) return;
 
-    char buf[MAX_FILE_DATA];
-    int len = fs_read_file(file_idx, buf, MAX_FILE_DATA);
+    char buf[MAX_TEXT_DATA];
+    int len = fs_read_file(file_idx, buf, MAX_TEXT_DATA);
     if (len <= 0) return;
 
     /* Parse into lines */

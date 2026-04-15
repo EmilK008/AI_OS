@@ -13,7 +13,7 @@ section .text
 [EXTERN _bss_end]
 
 _start:
-    mov  esp, 0x90000
+    mov  esp, 0x1F0000
     cld
 
     ; Zero out BSS section

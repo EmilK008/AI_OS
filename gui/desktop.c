@@ -63,6 +63,7 @@ void desktop_set_wallpaper(const char *filename) {
 
     struct fs_node *f = fs_get_node(idx);
     if (!f || f->type != FS_FILE || f->size < 7) { dbg_print("WP: bad file\n"); return; }
+    if (!f->data) { dbg_print("WP: no data\n"); return; }
 
     const char *d = f->data;
     if (d[0] != 'P' || d[1] != 'I' || d[2] != 'C') { dbg_print("WP: not PIC\n"); return; }

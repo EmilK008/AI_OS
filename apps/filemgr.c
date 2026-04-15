@@ -123,7 +123,7 @@ static void refresh_dir(void) {
 static void start_edit(int idx) {
     edit_file_idx = idx;
     struct fs_node *f = fs_get_node(idx);
-    if (!f || f->type != FS_FILE) { mode = MODE_BROWSE; return; }
+    if (!f || f->type != FS_FILE || !f->data) { mode = MODE_BROWSE; return; }
     edit_len = (int)f->size;
     if (edit_len > EDIT_MAXLEN) edit_len = EDIT_MAXLEN;
     mem_copy(edit_buf, f->data, (uint32_t)edit_len);

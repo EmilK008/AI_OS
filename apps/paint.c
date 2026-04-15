@@ -11,15 +11,19 @@
 #include "timer.h"
 #include "memory.h"
 
-#define PT_W          400
-#define PT_H          320
 #define TOOLBAR_H     42
 #define CANVAS_PAD    10
 #define CANVAS_X      CANVAS_PAD
 #define CANVAS_Y      (TOOLBAR_H + 2)
-#define CANVAS_W      (PT_W - CANVAS_PAD * 2)   /* 380 */
-#define CANVAS_H      (PT_H - TOOLBAR_H - CANVAS_PAD - 2) /* 266 */
 #define CANVAS_BG     COLOR_WHITE
+
+/* Maximum canvas dimensions (flat static buffer in BSS) */
+#define MAX_CANVAS_W  1024
+#define MAX_CANVAS_H  768
+
+/* Default canvas (same as original) */
+#define DEFAULT_CANVAS_W  380
+#define DEFAULT_CANVAS_H  266
 
 /* Palette */
 #define PAL_COUNT    16
@@ -44,6 +48,7 @@ static const int brush_sizes[BRUSH_COUNT] = { 1, 3, 5 };
 #define MODE_DRAW   0
 #define MODE_SAVE   1
 #define MODE_OPEN   2
+#define MODE_NEW    3
 
 /* Colors */
 #define C_TOOLBAR  COLOR_RGB(50, 50, 62)
@@ -64,14 +69,27 @@ static const color_t palette[PAL_COUNT] = {
     COLOR_RGB(128, 128, 128),  COLOR_RGB(200, 200, 200),
 };
 
+/* Canvas size presets */
+#define SIZE_COUNT 4
+static const int size_w[SIZE_COUNT] = { 380, 640, 800, 1024 };
+static const int size_h[SIZE_COUNT] = { 266, 480, 600, 768 };
+static const char *size_labels[SIZE_COUNT] = { "Small", "640x480", "800x600", "1024x768" };
+
 /* X offset where brush/action buttons start (after 8 swatches) */
 #define TOOLS_X  (4 + PAL_ROW * (SWATCH_SZ + SWATCH_GAP) + 8)
 
 static int win_id = -1;
 static int mode = MODE_DRAW;
 
-/* Canvas — stored as palette indices to enable compact saving */
-static uint8_t canvas[CANVAS_H][CANVAS_W];
+/* Dynamic canvas — heap-allocated, indexed as canvas[y * canvas_w + x] */
+static uint8_t *canvas;
+static int canvas_w = DEFAULT_CANVAS_W;
+static int canvas_h = DEFAULT_CANVAS_H;
+
+/* Dynamic window dimensions (computed from canvas size) */
+static int pt_w = DEFAULT_CANVAS_W + CANVAS_PAD * 2;
+static int pt_h = DEFAULT_CANVAS_H + TOOLBAR_H + CANVAS_PAD + 2;
+
 static int current_color = 0;  /* palette index */
 static int brush_idx = 1;      /* default medium brush (3px) */
 static bool eraser_on = false;
@@ -105,15 +123,24 @@ static void picker_refresh(void) {
 }
 
 /* --- Undo/Redo history --- */
-#define HISTORY_MAX 8
+#define HISTORY_MAX 4
 static uint8_t *history[HISTORY_MAX];
 static int hist_count = 0;   /* number of valid snapshots */
 static int hist_pos = -1;    /* current position (-1 = no history) */
 static bool hist_ready = false;
 
+static void history_free(void) {
+    for (int i = 0; i < HISTORY_MAX; i++) {
+        if (history[i]) { kfree(history[i]); history[i] = (uint8_t *)0; }
+    }
+    hist_count = 0;
+    hist_pos = -1;
+    hist_ready = false;
+}
+
 static void history_init(void) {
     for (int i = 0; i < HISTORY_MAX; i++) {
-        history[i] = (uint8_t *)kmalloc(CANVAS_W * CANVAS_H);
+        history[i] = (uint8_t *)kmalloc((uint32_t)(canvas_w * canvas_h));
     }
     hist_count = 0;
     hist_pos = -1;
@@ -122,10 +149,8 @@ static void history_init(void) {
 
 static void history_push(void) {
     if (!hist_ready) return;
-    /* Discard any redo states ahead of current position */
     hist_pos++;
     if (hist_pos >= HISTORY_MAX) {
-        /* Shift everything left to make room */
         uint8_t *tmp = history[0];
         for (int i = 0; i < HISTORY_MAX - 1; i++)
             history[i] = history[i + 1];
@@ -133,19 +158,22 @@ static void history_push(void) {
         hist_pos = HISTORY_MAX - 1;
     }
     hist_count = hist_pos + 1;
-    mem_copy(history[hist_pos], canvas, CANVAS_W * CANVAS_H);
+    if (history[hist_pos])
+        mem_copy(history[hist_pos], canvas, (uint32_t)(canvas_w * canvas_h));
 }
 
 static void history_undo(void) {
     if (!hist_ready || hist_pos <= 0) return;
     hist_pos--;
-    mem_copy(canvas, history[hist_pos], CANVAS_W * CANVAS_H);
+    if (history[hist_pos])
+        mem_copy(canvas, history[hist_pos], (uint32_t)(canvas_w * canvas_h));
 }
 
 static void history_redo(void) {
     if (!hist_ready || hist_pos >= hist_count - 1) return;
     hist_pos++;
-    mem_copy(canvas, history[hist_pos], CANVAS_W * CANVAS_H);
+    if (history[hist_pos])
+        mem_copy(canvas, history[hist_pos], (uint32_t)(canvas_w * canvas_h));
 }
 
 /* --- Drawing helpers --- */
@@ -183,10 +211,10 @@ static void paint_dot(int cx, int cy) {
     for (int dy = -r; dy <= r; dy++) {
         for (int dx = -r; dx <= r; dx++) {
             int px = cx + dx, py = cy + dy;
-            if (px >= 0 && px < CANVAS_W && py >= 0 && py < CANVAS_H) {
+            if (px >= 0 && px < canvas_w && py >= 0 && py < canvas_h) {
                 /* Circle shape for larger brushes */
                 if (r > 0 && dx * dx + dy * dy > r * r) continue;
-                canvas[py][px] = col;
+                canvas[py * canvas_w + px] = col;
             }
         }
     }
@@ -212,7 +240,53 @@ static void paint_line(int x0, int y0, int x1, int y1) {
 }
 
 static void clear_canvas(void) {
-    mem_set(canvas, 1, sizeof(canvas)); /* 1 = white palette index */
+    if (canvas)
+        mem_set(canvas, 1, (uint32_t)(canvas_w * canvas_h)); /* 1 = white palette index */
+}
+
+/* Forward declaration */
+static void paint_on_event(struct window *win, struct gui_event *evt);
+
+/* Resize canvas and recreate window */
+static void resize_canvas(int new_w, int new_h) {
+    if (new_w == canvas_w && new_h == canvas_h) {
+        /* Same size — just clear */
+        clear_canvas();
+        history_free();
+        history_init();
+        history_push();
+        mode = MODE_DRAW;
+        return;
+    }
+
+    canvas_w = new_w;
+    canvas_h = new_h;
+    pt_w = canvas_w + CANVAS_PAD * 2;
+    pt_h = canvas_h + TOOLBAR_H + CANVAS_PAD + 2;
+
+    /* Reallocate canvas buffer */
+    if (canvas) kfree(canvas);
+    canvas = (uint8_t *)kmalloc((uint32_t)(canvas_w * canvas_h));
+    if (!canvas) return;
+
+    clear_canvas();
+    history_free();
+    history_init();
+    history_push();
+
+    /* Recreate window at new size */
+    int old_x = 120, old_y = 40;
+    if (win_id >= 0) {
+        struct window *w = wm_get_window(win_id);
+        if (w && w->alive) {
+            old_x = w->x;
+            old_y = w->y;
+        }
+        wm_destroy_window(win_id);
+    }
+    win_id = wm_create_window("Paint", old_x, old_y, pt_w, pt_h,
+                               paint_on_event, NULL);
+    mode = MODE_DRAW;
 }
 
 /* --- Save/Load with RLE compression --- */
@@ -220,23 +294,24 @@ static void clear_canvas(void) {
 static void save_pic(const char *name) {
     /* Format: "PIC" (3) + w (2) + h (2) = 7 byte header
      * Then RLE: pairs of (count, palette_index), count 1-255 */
-    char buf[MAX_FILE_DATA];
+    char *buf = (char *)kmalloc(MAX_FILE_DATA);
+    if (!buf) return;
     int pos = 0;
 
     /* Header */
     buf[pos++] = 'P'; buf[pos++] = 'I'; buf[pos++] = 'C';
-    buf[pos++] = (char)(CANVAS_W & 0xFF);
-    buf[pos++] = (char)((CANVAS_W >> 8) & 0xFF);
-    buf[pos++] = (char)(CANVAS_H & 0xFF);
-    buf[pos++] = (char)((CANVAS_H >> 8) & 0xFF);
+    buf[pos++] = (char)(canvas_w & 0xFF);
+    buf[pos++] = (char)((canvas_w >> 8) & 0xFF);
+    buf[pos++] = (char)(canvas_h & 0xFF);
+    buf[pos++] = (char)((canvas_h >> 8) & 0xFF);
 
     /* RLE encode row by row */
-    for (int y = 0; y < CANVAS_H; y++) {
+    for (int y = 0; y < canvas_h; y++) {
         int x = 0;
-        while (x < CANVAS_W) {
-            uint8_t val = canvas[y][x];
+        while (x < canvas_w) {
+            uint8_t val = canvas[y * canvas_w + x];
             int run = 1;
-            while (x + run < CANVAS_W && canvas[y][x + run] == val && run < 255)
+            while (x + run < canvas_w && canvas[y * canvas_w + x + run] == val && run < 255)
                 run++;
             if (pos + 2 > MAX_FILE_DATA - 1) goto save_done;
             buf[pos++] = (char)run;
@@ -249,38 +324,66 @@ save_done:;
     int idx = fs_find(name);
     if (idx < 0) idx = fs_create(name, FS_FILE);
     if (idx >= 0) fs_write_file(idx, buf, (uint32_t)pos);
+    kfree(buf);
 }
 
 static void load_pic(const char *name) {
     int idx = fs_find(name);
     if (idx < 0) return;
     struct fs_node *f = fs_get_node(idx);
-    if (!f || f->type != FS_FILE || f->size < 7) return;
+    if (!f || f->type != FS_FILE || f->size < 7 || !f->data) return;
 
     const char *d = f->data;
     if (d[0] != 'P' || d[1] != 'I' || d[2] != 'C') return;
 
     int w = (uint8_t)d[3] | ((uint8_t)d[4] << 8);
     int h = (uint8_t)d[5] | ((uint8_t)d[6] << 8);
-    if (w != CANVAS_W || h != CANVAS_H) {
-        clear_canvas();
-        return;
+    if (w <= 0 || h <= 0 || w > MAX_CANVAS_W || h > MAX_CANVAS_H) return;
+
+    /* Resize canvas to match file dimensions */
+    if (w != canvas_w || h != canvas_h) {
+        canvas_w = w;
+        canvas_h = h;
+        pt_w = canvas_w + CANVAS_PAD * 2;
+        pt_h = canvas_h + TOOLBAR_H + CANVAS_PAD + 2;
+
+        /* Reallocate canvas buffer */
+        if (canvas) kfree(canvas);
+        canvas = (uint8_t *)kmalloc((uint32_t)(canvas_w * canvas_h));
+        if (!canvas) return;
+
+        history_free();
+        history_init();
+
+        /* Recreate window */
+        int old_x = 120, old_y = 40;
+        if (win_id >= 0) {
+            struct window *win = wm_get_window(win_id);
+            if (win && win->alive) {
+                old_x = win->x;
+                old_y = win->y;
+            }
+            wm_destroy_window(win_id);
+        }
+        win_id = wm_create_window("Paint", old_x, old_y, pt_w, pt_h,
+                                   paint_on_event, NULL);
     }
 
     /* RLE decode */
+    clear_canvas();
     int pos = 7;
     int size = (int)f->size;
-    clear_canvas();
-    for (int y = 0; y < CANVAS_H; y++) {
+    for (int y = 0; y < canvas_h; y++) {
         int x = 0;
-        while (x < CANVAS_W && pos + 1 < size) {
+        while (x < canvas_w && pos + 1 < size) {
             int run = (uint8_t)d[pos++];
             uint8_t val = (uint8_t)d[pos++];
             if (val >= PAL_COUNT) val = 0;
-            for (int i = 0; i < run && x < CANVAS_W; i++)
-                canvas[y][x++] = val;
+            for (int i = 0; i < run && x < canvas_w; i++)
+                canvas[y * canvas_w + x++] = val;
         }
     }
+    mode = MODE_DRAW;
     history_push();
 }
 
@@ -289,6 +392,18 @@ static void load_pic(const char *name) {
 static void paint_on_event(struct window *win, struct gui_event *evt) {
     if (evt->type == EVT_KEY_PRESS) {
         uint8_t k = evt->key;
+
+        /* New canvas size dialog */
+        if (mode == MODE_NEW) {
+            if (k == 0x1B) { mode = MODE_DRAW; return; }
+            /* Number keys 1-4 for quick size select */
+            if (k >= '1' && k <= '0' + SIZE_COUNT) {
+                int si = k - '1';
+                resize_canvas(size_w[si], size_h[si]);
+                return;
+            }
+            return;
+        }
 
         /* File picker (Open) */
         if (mode == MODE_OPEN) {
@@ -330,7 +445,7 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
 
         /* Keyboard shortcuts */
         if (k == 'e' || k == 'E') { eraser_on = !eraser_on; return; }
-        if (k == 14) { clear_canvas(); history_push(); return; } /* Ctrl+N */
+        if (k == 14) { mode = MODE_NEW; return; } /* Ctrl+N - New canvas */
         if (k == 19) { input_len = 0; mode = MODE_SAVE; return; } /* Ctrl+S */
         if (k == 26) { history_undo(); return; } /* Ctrl+Z - Undo */
         if (k == 25) { history_redo(); return; } /* Ctrl+Y - Redo */
@@ -356,12 +471,30 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
     int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
 
     if (evt->type == EVT_MOUSE_DOWN) {
+        /* New canvas size dialog click */
+        if (mode == MODE_NEW) {
+            int popup_w = 180;
+            int popup_h = 24 + SIZE_COUNT * 28 + 8;
+            int popup_x = (pt_w - popup_w) / 2;
+            int popup_y = (pt_h - popup_h) / 2;
+            int btn_y_start = popup_y + 24;
+            for (int i = 0; i < SIZE_COUNT; i++) {
+                int by = btn_y_start + i * 28;
+                if (mx >= popup_x + 10 && mx < popup_x + popup_w - 10 &&
+                    my >= by && my < by + 22) {
+                    resize_canvas(size_w[i], size_h[i]);
+                    return;
+                }
+            }
+            return;
+        }
+
         /* File picker click handling */
         if (mode == MODE_OPEN && picker_count > 0) {
             int popup_w = 220;
             int popup_h = 20 + PICKER_VISIBLE * 18 + 4;
-            int popup_x = (PT_W - popup_w) / 2;
-            int popup_y = (PT_H - popup_h) / 2;
+            int popup_x = (pt_w - popup_w) / 2;
+            int popup_y = (pt_h - popup_h) / 2;
             int list_x = popup_x + 4;
             int list_y = popup_y + 20;
             if (mx >= list_x && mx < list_x + popup_w - 8 &&
@@ -405,7 +538,7 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
             if (mx >= ax && mx < ax + BTN_W) { eraser_on = !eraser_on; return; }
             ax += BTN_W + BTN_GAP;
             /* New */
-            if (mx >= ax && mx < ax + BTN_W) { clear_canvas(); history_push(); return; }
+            if (mx >= ax && mx < ax + BTN_W) { mode = MODE_NEW; return; }
             ax += BTN_W + BTN_GAP;
             /* Save */
             if (mx >= ax && mx < ax + BTN_W) { input_len = 0; mode = MODE_SAVE; return; }
@@ -437,7 +570,7 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
         /* Canvas click — start drawing */
         int cx = mx - CANVAS_X;
         int cy = my - CANVAS_Y;
-        if (cx >= 0 && cx < CANVAS_W && cy >= 0 && cy < CANVAS_H) {
+        if (cx >= 0 && cx < canvas_w && cy >= 0 && cy < canvas_h) {
             drawing = true;
             paint_dot(cx, cy);
             last_mx = cx;
@@ -452,9 +585,9 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
             int cy = my - CANVAS_Y;
             /* Clamp to canvas */
             if (cx < 0) cx = 0;
-            if (cx >= CANVAS_W) cx = CANVAS_W - 1;
+            if (cx >= canvas_w) cx = canvas_w - 1;
             if (cy < 0) cy = 0;
-            if (cy >= CANVAS_H) cy = CANVAS_H - 1;
+            if (cy >= canvas_h) cy = canvas_h - 1;
 
             if (last_mx >= 0 && last_my >= 0) {
                 paint_line(last_mx, last_my, cx, cy);
@@ -483,7 +616,12 @@ void paint_create(void) {
         struct window *w = wm_get_window(win_id);
         if (w && w->alive) { wm_focus_window(win_id); return; }
     }
-    win_id = wm_create_window("Paint", 120, 40, PT_W, PT_H,
+    /* Allocate canvas if first open */
+    if (!canvas) {
+        canvas = (uint8_t *)kmalloc((uint32_t)(canvas_w * canvas_h));
+        if (!canvas) return;
+    }
+    win_id = wm_create_window("Paint", 120, 40, pt_w, pt_h,
                                paint_on_event, NULL);
     clear_canvas();
     current_color = 0;
@@ -596,27 +734,58 @@ void paint_render(void) {
 
     /* Canvas border */
     pt_rect(buf, cw, ch, CANVAS_X - 1, CANVAS_Y - 1,
-            CANVAS_W + 2, CANVAS_H + 2, C_BORDER);
+            canvas_w + 2, canvas_h + 2, C_BORDER);
 
     /* Canvas content — blit palette-indexed pixels */
-    for (int y = 0; y < CANVAS_H; y++) {
+    for (int y = 0; y < canvas_h; y++) {
         int dy = CANVAS_Y + y;
         if (dy >= ch) break;
-        for (int x = 0; x < CANVAS_W; x++) {
+        for (int x = 0; x < canvas_w; x++) {
             int dx = CANVAS_X + x;
             if (dx >= cw) break;
-            uint8_t pi = canvas[y][x];
+            uint8_t pi = canvas[y * canvas_w + x];
             if (pi >= PAL_COUNT) pi = 0;
             buf[dy * cw + dx] = palette[pi];
         }
+    }
+
+    /* New canvas size dialog */
+    if (mode == MODE_NEW) {
+        int popup_w = 180;
+        int popup_h = 24 + SIZE_COUNT * 28 + 8;
+        int popup_x = (pt_w - popup_w) / 2;
+        int popup_y = (pt_h - popup_h) / 2;
+
+        /* Background + border */
+        pt_rect(buf, cw, ch, popup_x, popup_y, popup_w, popup_h, COLOR_RGB(30, 30, 40));
+        pt_rect(buf, cw, ch, popup_x, popup_y, popup_w, 1, COLOR_RGB(100, 100, 120));
+        pt_rect(buf, cw, ch, popup_x, popup_y + popup_h - 1, popup_w, 1, COLOR_RGB(100, 100, 120));
+        pt_rect(buf, cw, ch, popup_x, popup_y, 1, popup_h, COLOR_RGB(100, 100, 120));
+        pt_rect(buf, cw, ch, popup_x + popup_w - 1, popup_y, 1, popup_h, COLOR_RGB(100, 100, 120));
+        pt_text(buf, cw, ch, popup_x + 8, popup_y + 4, "New Canvas Size",
+                COLOR_YELLOW, COLOR_RGB(30, 30, 40));
+
+        int btn_y_start = popup_y + 24;
+        for (int i = 0; i < SIZE_COUNT; i++) {
+            int by = btn_y_start + i * 28;
+            bool active = (size_w[i] == canvas_w && size_h[i] == canvas_h);
+            color_t bc = active ? C_BTN_ACT : C_BTN;
+            pt_rect(buf, cw, ch, popup_x + 10, by, popup_w - 20, 22, bc);
+            int tlen = str_len(size_labels[i]);
+            int tx = popup_x + (popup_w - tlen * 8) / 2;
+            pt_text(buf, cw, ch, tx, by + 3, size_labels[i], C_BTN_TEXT, bc);
+        }
+
+        pt_text(buf, cw, ch, popup_x + 8, popup_y + popup_h - 18,
+                "Esc=Cancel", COLOR_RGB(100, 100, 100), COLOR_RGB(30, 30, 40));
     }
 
     /* File picker popup (MODE_OPEN) */
     if (mode == MODE_OPEN) {
         int popup_w = 220;
         int popup_h = 20 + PICKER_VISIBLE * 18 + 4;
-        int popup_x = (PT_W - popup_w) / 2;
-        int popup_y = (PT_H - popup_h) / 2;
+        int popup_x = (pt_w - popup_w) / 2;
+        int popup_y = (pt_h - popup_h) / 2;
 
         /* Background */
         pt_rect(buf, cw, ch, popup_x, popup_y, popup_w, popup_h, COLOR_RGB(30, 30, 40));
@@ -651,8 +820,8 @@ void paint_render(void) {
 
     /* Save dialog (text input, overlaid on bottom) */
     if (mode == MODE_SAVE) {
-        int sy = PT_H - 22;
-        pt_rect(buf, cw, ch, 0, sy, PT_W, 22, C_TOOLBAR);
+        int sy = pt_h - 22;
+        pt_rect(buf, cw, ch, 0, sy, pt_w, 22, C_TOOLBAR);
         const char *prompt = "Save as: ";
         pt_text(buf, cw, ch, 4, sy + 3, prompt, COLOR_YELLOW, C_TOOLBAR);
         input_buf[input_len] = '\0';

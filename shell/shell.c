@@ -389,7 +389,7 @@ static void cmd_cat(int argc, char *argv[]) {
         return;
     }
     vga_putchar('\n');
-    char buf[MAX_FILE_DATA];
+    char buf[MAX_TEXT_DATA];
     int len = fs_read_file(idx, buf, sizeof(buf));
     if (len > 0) {
         vga_print(buf);
@@ -411,11 +411,11 @@ static void cmd_write(int argc, char *argv[]) {
     }
 
     /* Concatenate remaining args with spaces */
-    char content[MAX_FILE_DATA];
+    char content[MAX_TEXT_DATA];
     int pos = 0;
-    for (int i = 2; i < argc && pos < MAX_FILE_DATA - 2; i++) {
-        if (i > 2 && pos < MAX_FILE_DATA - 2) content[pos++] = ' ';
-        for (int j = 0; argv[i][j] && pos < MAX_FILE_DATA - 2; j++) {
+    for (int i = 2; i < argc && pos < MAX_TEXT_DATA - 2; i++) {
+        if (i > 2 && pos < MAX_TEXT_DATA - 2) content[pos++] = ' ';
+        for (int j = 0; argv[i][j] && pos < MAX_TEXT_DATA - 2; j++) {
             content[pos++] = argv[i][j];
         }
     }

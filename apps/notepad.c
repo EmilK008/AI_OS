@@ -387,7 +387,7 @@ static void np_open_file(const char *name) {
     int idx = fs_find(name);
     if (idx < 0) return;
     struct fs_node *f = fs_get_node(idx);
-    if (!f || f->type != FS_FILE) return;
+    if (!f || f->type != FS_FILE || !f->data) return;
 
     int len = (int)f->size;
     if (len > BUF_SIZE) len = BUF_SIZE;

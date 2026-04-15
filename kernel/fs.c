@@ -67,7 +67,7 @@ int fs_create(const char *name, uint8_t type) {
     str_copy(nodes[idx].name, name);
     nodes[idx].type = type;
     nodes[idx].size = 0;
-    nodes[idx].data[0] = '\0';
+    nodes[idx].data = (char *)0;
     nodes[idx].parent_idx = cwd_idx;
     nodes[idx].child_count = 0;
 
@@ -98,6 +98,12 @@ int fs_write_file(int idx, const char *data, uint32_t size) {
     if (nodes[idx].type != FS_FILE) return -1;
     if (size > MAX_FILE_DATA - 1) size = MAX_FILE_DATA - 1;
 
+    /* Allocate data buffer on first write */
+    if (!nodes[idx].data) {
+        nodes[idx].data = (char *)kmalloc(MAX_FILE_DATA);
+        if (!nodes[idx].data) return -1;
+    }
+
     mem_copy(nodes[idx].data, data, size);
     nodes[idx].data[size] = '\0';
     nodes[idx].size = size;
@@ -107,6 +113,14 @@ int fs_write_file(int idx, const char *data, uint32_t size) {
 int fs_append_file(int idx, const char *data, uint32_t size) {
     if (idx < 0 || idx >= MAX_FILES || !nodes[idx].used) return -1;
     if (nodes[idx].type != FS_FILE) return -1;
+
+    /* Allocate data buffer on first write */
+    if (!nodes[idx].data) {
+        nodes[idx].data = (char *)kmalloc(MAX_FILE_DATA);
+        if (!nodes[idx].data) return -1;
+        nodes[idx].size = 0;
+    }
+
     if (nodes[idx].size + size > MAX_FILE_DATA - 1) {
         size = MAX_FILE_DATA - 1 - nodes[idx].size;
     }
@@ -121,6 +135,7 @@ int fs_append_file(int idx, const char *data, uint32_t size) {
 int fs_read_file(int idx, char *buffer, uint32_t max_size) {
     if (idx < 0 || idx >= MAX_FILES || !nodes[idx].used) return -1;
     if (nodes[idx].type != FS_FILE) return -1;
+    if (!nodes[idx].data) return 0;
 
     uint32_t to_read = nodes[idx].size;
     if (to_read > max_size - 1) to_read = max_size - 1;
@@ -150,6 +165,10 @@ int fs_delete(const char *name) {
     }
 
     nodes[idx].used = false;
+    if (nodes[idx].data) {
+        kfree(nodes[idx].data);
+        nodes[idx].data = (char *)0;
+    }
     return 0;
 }
 

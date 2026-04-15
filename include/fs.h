@@ -7,14 +7,15 @@
 #define FS_DIR       1
 #define MAX_FILES    64
 #define MAX_FILENAME 32
-#define MAX_FILE_DATA 4096
-#define MAX_CHILDREN 16
+#define MAX_FILE_DATA  65536
+#define MAX_TEXT_DATA  4096
+#define MAX_CHILDREN   16
 
 struct fs_node {
     char name[MAX_FILENAME];
     uint8_t type;
     uint32_t size;
-    char data[MAX_FILE_DATA];
+    char *data;
     int parent_idx;
     int children[MAX_CHILDREN];
     int child_count;
