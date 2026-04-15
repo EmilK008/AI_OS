@@ -82,6 +82,28 @@ static int last_mx = -1, last_my = -1;
 static char input_buf[32];
 static int  input_len = 0;
 
+/* File picker state (for MODE_OPEN) */
+static int  picker_entries[MAX_CHILDREN];
+static int  picker_count = 0;
+static int  picker_sel = 0;
+static int  picker_scroll = 0;
+#define PICKER_VISIBLE  8
+
+static void picker_refresh(void) {
+    picker_count = 0;
+    picker_sel = 0;
+    picker_scroll = 0;
+    int cwd = fs_get_cwd();
+    struct fs_node *dir = fs_get_node(cwd);
+    if (!dir) return;
+    for (int i = 0; i < dir->child_count && picker_count < MAX_CHILDREN; i++) {
+        int ci = dir->children[i];
+        struct fs_node *child = fs_get_node(ci);
+        if (child && child->used && child->type == FS_FILE)
+            picker_entries[picker_count++] = ci;
+    }
+}
+
 /* --- Undo/Redo history --- */
 #define HISTORY_MAX 8
 static uint8_t *history[HISTORY_MAX];
@@ -268,13 +290,35 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
     if (evt->type == EVT_KEY_PRESS) {
         uint8_t k = evt->key;
 
-        /* File dialog */
-        if (mode == MODE_SAVE || mode == MODE_OPEN) {
+        /* File picker (Open) */
+        if (mode == MODE_OPEN) {
+            if (k == 0x1B) { mode = MODE_DRAW; return; }
+            if (k == KEY_UP) {
+                if (picker_sel > 0) picker_sel--;
+                if (picker_sel < picker_scroll) picker_scroll = picker_sel;
+                return;
+            }
+            if (k == KEY_DOWN) {
+                if (picker_sel < picker_count - 1) picker_sel++;
+                if (picker_sel >= picker_scroll + PICKER_VISIBLE)
+                    picker_scroll = picker_sel - PICKER_VISIBLE + 1;
+                return;
+            }
+            if (k == '\n' && picker_count > 0) {
+                struct fs_node *f = fs_get_node(picker_entries[picker_sel]);
+                if (f) load_pic(f->name);
+                mode = MODE_DRAW;
+                return;
+            }
+            return;
+        }
+
+        /* Save dialog input */
+        if (mode == MODE_SAVE) {
             if (k == 0x1B) { mode = MODE_DRAW; return; }
             if (k == '\n' && input_len > 0) {
                 input_buf[input_len] = '\0';
-                if (mode == MODE_SAVE) save_pic(input_buf);
-                else load_pic(input_buf);
+                save_pic(input_buf);
                 mode = MODE_DRAW;
                 return;
             }
@@ -312,6 +356,26 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
     int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
 
     if (evt->type == EVT_MOUSE_DOWN) {
+        /* File picker click handling */
+        if (mode == MODE_OPEN && picker_count > 0) {
+            int popup_w = 220;
+            int popup_h = 20 + PICKER_VISIBLE * 18 + 4;
+            int popup_x = (PT_W - popup_w) / 2;
+            int popup_y = (PT_H - popup_h) / 2;
+            int list_x = popup_x + 4;
+            int list_y = popup_y + 20;
+            if (mx >= list_x && mx < list_x + popup_w - 8 &&
+                my >= list_y && my < list_y + PICKER_VISIBLE * 18) {
+                int idx = (my - list_y) / 18 + picker_scroll;
+                if (idx >= 0 && idx < picker_count) {
+                    struct fs_node *f = fs_get_node(picker_entries[idx]);
+                    if (f) load_pic(f->name);
+                    mode = MODE_DRAW;
+                }
+                return;
+            }
+        }
+
         /* Row 1 toolbar clicks (y = ROW1_Y .. ROW1_Y+BTN_H) */
         if (my >= ROW1_Y && my < ROW1_Y + BTN_H) {
             /* Color palette row 1: swatches 0-7 */
@@ -347,7 +411,7 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
             if (mx >= ax && mx < ax + BTN_W) { input_len = 0; mode = MODE_SAVE; return; }
             ax += BTN_W + BTN_GAP;
             /* Open */
-            if (mx >= ax && mx < ax + BTN_W) { input_len = 0; mode = MODE_OPEN; return; }
+            if (mx >= ax && mx < ax + BTN_W) { picker_refresh(); mode = MODE_OPEN; return; }
         }
 
         /* Row 2 toolbar clicks (y = ROW2_Y .. ROW2_Y+BTN_H) */
@@ -547,11 +611,49 @@ void paint_render(void) {
         }
     }
 
-    /* Status bar / file dialog (overlaid on bottom of canvas) */
-    if (mode == MODE_SAVE || mode == MODE_OPEN) {
+    /* File picker popup (MODE_OPEN) */
+    if (mode == MODE_OPEN) {
+        int popup_w = 220;
+        int popup_h = 20 + PICKER_VISIBLE * 18 + 4;
+        int popup_x = (PT_W - popup_w) / 2;
+        int popup_y = (PT_H - popup_h) / 2;
+
+        /* Background */
+        pt_rect(buf, cw, ch, popup_x, popup_y, popup_w, popup_h, COLOR_RGB(30, 30, 40));
+        /* Border */
+        pt_rect(buf, cw, ch, popup_x, popup_y, popup_w, 1, COLOR_RGB(100, 100, 120));
+        pt_rect(buf, cw, ch, popup_x, popup_y + popup_h - 1, popup_w, 1, COLOR_RGB(100, 100, 120));
+        pt_rect(buf, cw, ch, popup_x, popup_y, 1, popup_h, COLOR_RGB(100, 100, 120));
+        pt_rect(buf, cw, ch, popup_x + popup_w - 1, popup_y, 1, popup_h, COLOR_RGB(100, 100, 120));
+        /* Title */
+        pt_text(buf, cw, ch, popup_x + 8, popup_y + 2, "Open File", COLOR_YELLOW, COLOR_RGB(30, 30, 40));
+
+        if (picker_count == 0) {
+            pt_text(buf, cw, ch, popup_x + 8, popup_y + 22, "(no files)", COLOR_RGB(120, 120, 120), COLOR_RGB(30, 30, 40));
+        } else {
+            int list_y = popup_y + 20;
+            int visible = picker_count - picker_scroll;
+            if (visible > PICKER_VISIBLE) visible = PICKER_VISIBLE;
+            for (int i = 0; i < visible; i++) {
+                int fi = picker_scroll + i;
+                int iy = list_y + i * 18;
+                struct fs_node *f = fs_get_node(picker_entries[fi]);
+                if (!f) continue;
+                color_t row_bg = (fi == picker_sel) ? COLOR_RGB(50, 80, 130) : COLOR_RGB(30, 30, 40);
+                pt_rect(buf, cw, ch, popup_x + 2, iy, popup_w - 4, 18, row_bg);
+                pt_text(buf, cw, ch, popup_x + 8, iy + 1, f->name, COLOR_WHITE, row_bg);
+            }
+        }
+        /* Hint */
+        pt_text(buf, cw, ch, popup_x + 8, popup_y + popup_h - 18,
+                "Enter=Open  Esc=Cancel", COLOR_RGB(100, 100, 100), COLOR_RGB(30, 30, 40));
+    }
+
+    /* Save dialog (text input, overlaid on bottom) */
+    if (mode == MODE_SAVE) {
         int sy = PT_H - 22;
         pt_rect(buf, cw, ch, 0, sy, PT_W, 22, C_TOOLBAR);
-        const char *prompt = (mode == MODE_SAVE) ? "Save as: " : "Open: ";
+        const char *prompt = "Save as: ";
         pt_text(buf, cw, ch, 4, sy + 3, prompt, COLOR_YELLOW, C_TOOLBAR);
         input_buf[input_len] = '\0';
         int px = 4 + str_len(prompt) * 8;

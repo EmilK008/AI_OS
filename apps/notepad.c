@@ -165,6 +165,28 @@ static int  replace_len = 0;
 static int  find_match_pos = -1;  /* position of current match in text_buf */
 static bool find_field_active = true; /* true = editing find, false = editing replace */
 
+/* File picker state (for MODE_OPEN) */
+static int  picker_entries[MAX_CHILDREN];
+static int  picker_count = 0;
+static int  picker_sel = 0;
+static int  picker_scroll = 0;
+#define PICKER_VISIBLE  10  /* max visible rows in picker */
+
+static void picker_refresh(void) {
+    picker_count = 0;
+    picker_sel = 0;
+    picker_scroll = 0;
+    int cwd = fs_get_cwd();
+    struct fs_node *dir = fs_get_node(cwd);
+    if (!dir) return;
+    for (int i = 0; i < dir->child_count && picker_count < MAX_CHILDREN; i++) {
+        int ci = dir->children[i];
+        struct fs_node *child = fs_get_node(ci);
+        if (child && child->used && child->type == FS_FILE)
+            picker_entries[picker_count++] = ci;
+    }
+}
+
 /* Computed layout helpers */
 static int get_text_x(void) {
     return TEXT_PAD + (show_line_numbers ? GUTTER_W : 0);
@@ -514,14 +536,36 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
             return;
         }
 
-        /* Open/Save dialog input */
-        if (mode == MODE_OPEN || mode == MODE_SAVE) {
+        /* File picker (Open) */
+        if (mode == MODE_OPEN) {
+            if (k == 0x1B) { mode = MODE_EDIT; return; }
+            if (k == KEY_UP) {
+                if (picker_sel > 0) picker_sel--;
+                if (picker_sel < picker_scroll) picker_scroll = picker_sel;
+                return;
+            }
+            if (k == KEY_DOWN) {
+                if (picker_sel < picker_count - 1) picker_sel++;
+                if (picker_sel >= picker_scroll + PICKER_VISIBLE)
+                    picker_scroll = picker_sel - PICKER_VISIBLE + 1;
+                return;
+            }
+            if (k == '\n' && picker_count > 0) {
+                struct fs_node *f = fs_get_node(picker_entries[picker_sel]);
+                if (f) np_open_file(f->name);
+                mode = MODE_EDIT;
+                return;
+            }
+            return;
+        }
+
+        /* Save dialog input */
+        if (mode == MODE_SAVE) {
             if (k == 0x1B) { mode = MODE_EDIT; return; }
             if (k == '\n') {
                 if (input_len > 0) {
                     input_buf[input_len] = '\0';
-                    if (mode == MODE_OPEN) np_open_file(input_buf);
-                    else np_save_file(input_buf);
+                    np_save_file(input_buf);
                 }
                 mode = MODE_EDIT;
                 return;
@@ -643,6 +687,26 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
         int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
         int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
 
+        /* File picker click handling */
+        if (mode == MODE_OPEN && picker_count > 0) {
+            int popup_w = 260;
+            int popup_h = 20 + PICKER_VISIBLE * 18 + 4;
+            int popup_x = (NP_W - popup_w) / 2;
+            int popup_y = (NP_H - popup_h) / 2;
+            int list_x = popup_x + 4;
+            int list_y = popup_y + 20;
+            if (mx >= list_x && mx < list_x + popup_w - 8 &&
+                my >= list_y && my < list_y + PICKER_VISIBLE * 18) {
+                int idx = (my - list_y) / 18 + picker_scroll;
+                if (idx >= 0 && idx < picker_count) {
+                    struct fs_node *f = fs_get_node(picker_entries[idx]);
+                    if (f) np_open_file(f->name);
+                    mode = MODE_EDIT;
+                }
+                return;
+            }
+        }
+
         /* Row 1 toolbar buttons */
         if (my >= 3 && my < 3 + BTN_H) {
             for (int i = 0; i < ROW1_BTN_COUNT; i++) {
@@ -652,7 +716,7 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
                     case 0: /* New */
                         np_new_file(); mode = MODE_EDIT; break;
                     case 1: /* Open */
-                        input_len = 0; mode = MODE_OPEN; break;
+                        picker_refresh(); mode = MODE_OPEN; break;
                     case 2: /* Save */
                         if (filename_len > 0) np_save_file(filename);
                         else { input_len = 0; mode = MODE_SAVE; }
@@ -954,8 +1018,44 @@ void notepad_render(void) {
     /* Status bar */
     np_rect(buf, cw, ch, 0, NP_H - STATUS_H, NP_W, STATUS_H, theme_status_bg());
 
-    if (mode == MODE_OPEN || mode == MODE_SAVE) {
-        const char *prompt = (mode == MODE_OPEN) ? "Open: " : "Save as: ";
+    if (mode == MODE_OPEN) {
+        /* File picker popup overlay */
+        int popup_w = 260;
+        int popup_h = 20 + PICKER_VISIBLE * 18 + 4;
+        int popup_x = (NP_W - popup_w) / 2;
+        int popup_y = (NP_H - popup_h) / 2;
+
+        /* Background */
+        np_rect(buf, cw, ch, popup_x, popup_y, popup_w, popup_h, COLOR_RGB(30, 30, 40));
+        /* Border */
+        np_rect(buf, cw, ch, popup_x, popup_y, popup_w, 1, COLOR_RGB(100, 100, 120));
+        np_rect(buf, cw, ch, popup_x, popup_y + popup_h - 1, popup_w, 1, COLOR_RGB(100, 100, 120));
+        np_rect(buf, cw, ch, popup_x, popup_y, 1, popup_h, COLOR_RGB(100, 100, 120));
+        np_rect(buf, cw, ch, popup_x + popup_w - 1, popup_y, 1, popup_h, COLOR_RGB(100, 100, 120));
+        /* Title */
+        np_text(buf, cw, ch, popup_x + 8, popup_y + 2, "Open File", COLOR_YELLOW, COLOR_RGB(30, 30, 40));
+
+        if (picker_count == 0) {
+            np_text(buf, cw, ch, popup_x + 8, popup_y + 22, "(no files)", COLOR_RGB(120, 120, 120), COLOR_RGB(30, 30, 40));
+        } else {
+            int list_y = popup_y + 20;
+            int visible = picker_count - picker_scroll;
+            if (visible > PICKER_VISIBLE) visible = PICKER_VISIBLE;
+            for (int i = 0; i < visible; i++) {
+                int fi = picker_scroll + i;
+                int iy = list_y + i * 18;
+                struct fs_node *f = fs_get_node(picker_entries[fi]);
+                if (!f) continue;
+                color_t row_bg = (fi == picker_sel) ? COLOR_RGB(50, 80, 130) : COLOR_RGB(30, 30, 40);
+                np_rect(buf, cw, ch, popup_x + 2, iy, popup_w - 4, 18, row_bg);
+                np_text(buf, cw, ch, popup_x + 8, iy + 1, f->name, COLOR_WHITE, row_bg);
+            }
+        }
+        /* Hint */
+        np_text(buf, cw, ch, popup_x + 8, popup_y + popup_h - 18,
+                "Enter=Open  Esc=Cancel", COLOR_RGB(100, 100, 100), COLOR_RGB(30, 30, 40));
+    } else if (mode == MODE_SAVE) {
+        const char *prompt = "Save as: ";
         np_text(buf, cw, ch, 4, NP_H - STATUS_H + 2, prompt, COLOR_YELLOW, theme_status_bg());
         input_buf[input_len] = '\0';
         int px = 4 + str_len(prompt) * 8;
