@@ -13,6 +13,7 @@
 #include "process.h"
 #include "editor.h"
 #include "speaker.h"
+#include "rtc.h"
 #include "snake.h"
 
 #define CMD_BUFFER_SIZE 256
@@ -81,12 +82,13 @@ static void cmd_help(void) {
     help_row("  info        System information",        "  mkdir <n>   Create directory");
     help_row("  mem         Memory usage",              "  touch <f>   Create empty file");
     help_row("  uptime      Show uptime",               "  cat <f>     Print file contents");
-    help_row("  color <0-F> Change text color",         "  write <f> t Write text to file");
-    help_row("  history     Command history",           "  rm <name>   Delete file/dir");
-    help_row("  calc <expr> Calculator (+ - * / %)",    "  edit <f>    Text editor");
-    help_row("  matrix      Matrix rain effect",        "  beep <hz>   Play a tone");
-    help_row("  sleep <sec> Sleep N seconds",           "  play <notes> Play notes");
-    help_row("  logo        Show AI_OS logo",           "  song        Play a melody");
+    help_row("  time        Show current time",          "  write <f> t Write text to file");
+    help_row("  date        Show date and time",         "  rm <name>   Delete file/dir");
+    help_row("  color <0-F> Change text color",         "  edit <f>    Text editor");
+    help_row("  history     Command history",           "  beep <hz>   Play a tone");
+    help_row("  calc <expr> Calculator (+ - * / %)",    "  play <notes> Play notes");
+    help_row("  matrix      Matrix rain effect",        "  song        Play a melody");
+    help_row("  sleep <sec> Sleep N seconds",           "  logo        Show AI_OS logo");
     vga_print_colored(" Processes:                             ", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
     vga_print_colored("System:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
     help_row("  ps          List processes",            "  panic <t>   Test crash handler");
@@ -155,6 +157,49 @@ static void cmd_uptime(void) {
     vga_print("s (");
     vga_print_dec(ticks);
     vga_print(" ticks)\n\n");
+}
+
+static void cmd_time(void) {
+    char time_str[9];
+    rtc_format_time(time_str);
+    vga_print("\n  Time: ");
+    vga_print_colored(time_str, VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK));
+    vga_print("\n\n");
+}
+
+static void cmd_date(void) {
+    char date_str[11];
+    char time_str[9];
+    rtc_format_date(date_str);
+    rtc_format_time(time_str);
+
+    struct rtc_time t;
+    rtc_read(&t);
+
+    static const char *day_names[] = {
+        "???", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+    };
+    static const char *month_names[] = {
+        "???", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    };
+
+    uint8_t wd = t.weekday;
+    if (wd > 7) wd = 0;
+    uint8_t mo = t.month;
+    if (mo > 12) mo = 0;
+
+    vga_print("\n  ");
+    vga_print_colored(day_names[wd], VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
+    vga_print(" ");
+    vga_print_colored(month_names[mo], VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
+    vga_print(" ");
+    vga_print_dec(t.day);
+    vga_print(" ");
+    vga_print_colored(time_str, VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK));
+    vga_print(" ");
+    vga_print_dec(t.century * 100 + t.year);
+    vga_print("\n\n");
 }
 
 static void cmd_color(int argc, char *argv[]) {
@@ -441,25 +486,11 @@ static void cmd_kill(int argc, char *argv[]) {
 
 static void prog_clock(void) {
     while (1) {
-        uint32_t ticks = timer_get_ticks();
-        uint32_t secs = ticks / 100;
-        uint32_t mins = (secs / 60) % 60;
-        uint32_t hrs = (secs / 3600) % 24;
-        secs %= 60;
+        char time_str[9];
+        rtc_format_time(time_str);
 
         /* Draw clock in top-right corner */
         uint8_t color = VGA_COLOR(VGA_BLACK, VGA_LIGHT_GREEN);
-        char time_str[9];
-        time_str[0] = '0' + (hrs / 10);
-        time_str[1] = '0' + (hrs % 10);
-        time_str[2] = ':';
-        time_str[3] = '0' + (mins / 10);
-        time_str[4] = '0' + (mins % 10);
-        time_str[5] = ':';
-        time_str[6] = '0' + (secs / 10);
-        time_str[7] = '0' + (secs % 10);
-        time_str[8] = '\0';
-
         for (int i = 0; i < 8; i++) {
             vga_putchar_at(72 + i, 0, time_str[i], color);
         }
@@ -689,6 +720,8 @@ void shell_execute(char *input) {
     else if (str_eq(argv[0], "info"))    cmd_info();
     else if (str_eq(argv[0], "mem"))     cmd_mem();
     else if (str_eq(argv[0], "uptime"))  cmd_uptime();
+    else if (str_eq(argv[0], "time"))    cmd_time();
+    else if (str_eq(argv[0], "date"))    cmd_date();
     else if (str_eq(argv[0], "color"))   cmd_color(argc, argv);
     else if (str_eq(argv[0], "reboot"))  cmd_reboot();
     else if (str_eq(argv[0], "halt"))    cmd_halt();

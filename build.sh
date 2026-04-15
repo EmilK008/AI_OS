@@ -54,6 +54,7 @@ $CC $CFLAGS drivers/timer.c    -o "$BUILD_DIR/timer.o"
 $CC $CFLAGS drivers/speaker.c  -o "$BUILD_DIR/speaker.o"
 $CC $CFLAGS drivers/framebuffer.c -o "$BUILD_DIR/framebuffer.o"
 $CC $CFLAGS drivers/mouse.c    -o "$BUILD_DIR/mouse.o"
+$CC $CFLAGS drivers/rtc.c     -o "$BUILD_DIR/rtc.o"
 # Shell & Apps
 $CC $CFLAGS shell/shell.c      -o "$BUILD_DIR/shell.o"
 $CC $CFLAGS apps/editor.c      -o "$BUILD_DIR/editor.o"
@@ -93,6 +94,7 @@ $LD $LDFLAGS \
     "$BUILD_DIR/speaker.o" \
     "$BUILD_DIR/framebuffer.o" \
     "$BUILD_DIR/mouse.o" \
+    "$BUILD_DIR/rtc.o" \
     "$BUILD_DIR/font_data.o" \
     "$BUILD_DIR/event.o" \
     "$BUILD_DIR/window.o" \

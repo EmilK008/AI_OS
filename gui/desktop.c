@@ -4,6 +4,7 @@
 #include "desktop.h"
 #include "framebuffer.h"
 #include "timer.h"
+#include "rtc.h"
 #include "string.h"
 
 void desktop_init(void) {
@@ -27,23 +28,13 @@ void desktop_draw_taskbar(void) {
     fb_draw_rect(2, h - 26, 54, 22, COLOR_LIGHT_GREY);
     fb_draw_string(8, h - 23, "AI_OS", COLOR_CYAN, COLOR_BUTTON);
 
-    /* Clock in right corner */
-    uint32_t ticks = timer_get_ticks();
-    uint32_t secs  = ticks / 100;
-    uint32_t mins  = (secs / 60) % 60;
-    uint32_t hrs   = (secs / 3600) % 24;
-    secs %= 60;
-
+    /* Clock in right corner - real time from CMOS RTC */
     char time_str[9];
-    time_str[0] = '0' + (hrs / 10);
-    time_str[1] = '0' + (hrs % 10);
-    time_str[2] = ':';
-    time_str[3] = '0' + (mins / 10);
-    time_str[4] = '0' + (mins % 10);
-    time_str[5] = ':';
-    time_str[6] = '0' + (secs / 10);
-    time_str[7] = '0' + (secs % 10);
-    time_str[8] = '\0';
-
+    rtc_format_time(time_str);
     fb_draw_string(w - 72, h - 23, time_str, COLOR_WHITE, COLOR_TASKBAR);
+
+    /* Date left of clock */
+    char date_str[11];
+    rtc_format_date(date_str);
+    fb_draw_string(w - 72 - 88, h - 23, date_str, COLOR_LIGHT_GREY, COLOR_TASKBAR);
 }

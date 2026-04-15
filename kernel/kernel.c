@@ -8,6 +8,7 @@
 #include "idt.h"
 #include "keyboard.h"
 #include "timer.h"
+#include "rtc.h"
 #include "memory.h"
 #include "shell.h"
 #include "string.h"
@@ -47,6 +48,7 @@ void kernel_main(void) {
     event_init();
     mouse_init();
     dbg_print("KBD/EVT/MOUSE ok\n");
+    rtc_init();
     fs_init();
     process_init();
     dbg_print("FS/PROC ok\n");
