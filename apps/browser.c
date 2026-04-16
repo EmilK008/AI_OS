@@ -500,24 +500,37 @@ void browser_render(void) {
             } else if (tag_eq(tag_name, tn, "h2")) {
                 if (!closing) { heading = 2; draw_y += 6; draw_x = 8; }
                 else { heading = 0; draw_y += 18; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "h3")) {
+            } else if (tag_eq(tag_name, tn, "h3") || tag_eq(tag_name, tn, "h4") ||
+                       tag_eq(tag_name, tn, "h5") || tag_eq(tag_name, tn, "h6")) {
                 if (!closing) { heading = 3; draw_y += 4; draw_x = 8; }
                 else { heading = 0; draw_y += 16; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "p")) {
+            } else if (tag_eq(tag_name, tn, "p") || tag_eq(tag_name, tn, "div") ||
+                       tag_eq(tag_name, tn, "article") || tag_eq(tag_name, tn, "section") ||
+                       tag_eq(tag_name, tn, "aside") || tag_eq(tag_name, tn, "footer") ||
+                       tag_eq(tag_name, tn, "header") || tag_eq(tag_name, tn, "nav")) {
                 if (!closing) { draw_y += 6; draw_x = 8; }
                 else { draw_y += 8; draw_x = 8; }
+            } else if (tag_eq(tag_name, tn, "blockquote")) {
+                if (!closing) { draw_y += 4; draw_x = 32; }
+                else { draw_y += 4; draw_x = 8; }
+            } else if (tag_eq(tag_name, tn, "pre") || tag_eq(tag_name, tn, "code")) {
+                /* Render in monospace (same font but different color) */
+                if (!closing) { in_bold = true; }
+                else { in_bold = false; }
             } else if (tag_eq(tag_name, tn, "b") || tag_eq(tag_name, tn, "strong")) {
                 in_bold = !closing;
-            } else if (tag_eq(tag_name, tn, "i") || tag_eq(tag_name, tn, "em")) {
+            } else if (tag_eq(tag_name, tn, "i") || tag_eq(tag_name, tn, "em") ||
+                       tag_eq(tag_name, tn, "abbr")) {
                 in_italic = !closing;
             } else if (tag_eq(tag_name, tn, "u")) {
                 in_underline = !closing;
+            } else if (tag_eq(tag_name, tn, "sub") || tag_eq(tag_name, tn, "sup")) {
+                in_italic = !closing;
             } else if (tag_eq(tag_name, tn, "br")) {
                 draw_y += 16;
                 draw_x = 8;
             } else if (tag_eq(tag_name, tn, "hr")) {
                 draw_y += 4;
-                /* Draw horizontal rule in content region */
                 int rule_y = CONTENT_Y + draw_y - scroll_y;
                 if (rule_y >= CONTENT_Y && rule_y < CONTENT_Y + CONTENT_H)
                     brw_rect(buf, cw, ch, 8, rule_y, BRW_W - 16, 1, C_HR);
@@ -530,7 +543,6 @@ void browser_render(void) {
                     link_start_x = draw_x;
                     link_start_y = draw_y;
                 } else {
-                    /* Register link region */
                     if (in_link && link_count < MAX_LINKS && current_href[0]) {
                         links[link_count].x = link_start_x;
                         links[link_count].y = link_start_y;
@@ -542,10 +554,11 @@ void browser_render(void) {
                     in_link = false;
                     current_href[0] = '\0';
                 }
-            } else if (tag_eq(tag_name, tn, "ul") || tag_eq(tag_name, tn, "ol")) {
+            } else if (tag_eq(tag_name, tn, "ul") || tag_eq(tag_name, tn, "ol") ||
+                       tag_eq(tag_name, tn, "dl")) {
                 if (!closing) { in_list = true; draw_y += 4; }
                 else { in_list = false; draw_y += 4; }
-            } else if (tag_eq(tag_name, tn, "li")) {
+            } else if (tag_eq(tag_name, tn, "li") || tag_eq(tag_name, tn, "dd")) {
                 if (!closing) {
                     draw_y += 2;
                     draw_x = in_list ? 24 : 8;
@@ -554,6 +567,28 @@ void browser_render(void) {
                     draw_y += 16;
                     draw_x = 8;
                 }
+            } else if (tag_eq(tag_name, tn, "dt")) {
+                if (!closing) { draw_y += 2; draw_x = in_list ? 16 : 8; in_bold = true; }
+                else { in_bold = false; draw_y += 16; draw_x = 8; }
+            } else if (tag_eq(tag_name, tn, "table") || tag_eq(tag_name, tn, "thead") ||
+                       tag_eq(tag_name, tn, "tbody")) {
+                if (!closing) { draw_y += 4; draw_x = 8; }
+                else { draw_y += 4; }
+            } else if (tag_eq(tag_name, tn, "tr")) {
+                if (!closing) { draw_x = 8; }
+                else { draw_y += 16; draw_x = 8; }
+            } else if (tag_eq(tag_name, tn, "td") || tag_eq(tag_name, tn, "th")) {
+                if (!closing) { draw_x += 8; }
+                else { draw_x += 16; }
+            } else if (tag_eq(tag_name, tn, "title") || tag_eq(tag_name, tn, "head") ||
+                       tag_eq(tag_name, tn, "html") || tag_eq(tag_name, tn, "body") ||
+                       tag_eq(tag_name, tn, "style") || tag_eq(tag_name, tn, "meta") ||
+                       tag_eq(tag_name, tn, "link") || tag_eq(tag_name, tn, "img") ||
+                       tag_eq(tag_name, tn, "input") || tag_eq(tag_name, tn, "form") ||
+                       tag_eq(tag_name, tn, "button") || tag_eq(tag_name, tn, "label") ||
+                       tag_eq(tag_name, tn, "textarea") || tag_eq(tag_name, tn, "col") ||
+                       tag_eq(tag_name, tn, "caption") || tag_eq(tag_name, tn, "span")) {
+                /* Known tags - silently skip (no layout effect or handled inline) */
             }
             /* Skip unknown tags */
             continue;

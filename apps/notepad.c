@@ -176,7 +176,7 @@ static int  picker_scroll = 0;
 #define AC_MODE_TAG    0
 #define AC_MODE_ATTR   1
 #define AC_MODE_CLOSE  2
-#define AC_MAX_MATCHES 16
+#define AC_MAX_MATCHES 48
 #define AC_MAX_VISIBLE 6
 #define AC_POPUP_W     130
 #define AC_ITEM_H      16
@@ -193,27 +193,57 @@ static int  ac_match_count = 0;
 static char ac_tag_ctx[16]; /* tag name for attribute context */
 
 /* HTML tag database */
-#define HTML_TAG_COUNT 17
+#define HTML_TAG_COUNT 56
 static const char *html_tags[HTML_TAG_COUNT] = {
-    "a", "b", "br", "div", "em", "h1", "h2", "h3", "hr",
-    "i", "li", "ol", "p", "span", "strong", "u", "ul"
+    "a", "abbr", "article", "aside", "b", "blockquote", "body", "br",
+    "button", "caption", "code", "col", "dd", "div", "dl", "dt",
+    "em", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+    "head", "header", "hr", "html", "i", "img", "input", "label",
+    "li", "link", "meta", "nav", "ol", "p", "pre", "section",
+    "span", "strong", "style", "sub", "sup", "table", "tbody", "td",
+    "textarea", "th", "thead", "title", "tr", "u", "ul"
 };
 /* Void tags (self-closing, no </tag>) */
 static bool html_void_tag(const char *tag) {
-    return (str_eq(tag, "br") || str_eq(tag, "hr"));
+    return (str_eq(tag, "br") || str_eq(tag, "hr") || str_eq(tag, "img") ||
+            str_eq(tag, "input") || str_eq(tag, "meta") || str_eq(tag, "link") ||
+            str_eq(tag, "col"));
 }
 
 /* Attribute database: tag -> attributes */
-#define HTML_ATTR_COUNT 5
+#define HTML_ATTR_COUNT 28
 static const struct {
     const char *tag;  /* NULL = generic (applies to all) */
     const char *attr;
 } html_attrs[HTML_ATTR_COUNT] = {
-    { "a",    "href" },
-    { "img",  "src"  },
-    { "img",  "alt"  },
-    { (const char *)0, "id"    },
-    { (const char *)0, "class" },
+    { "a",        "href"        },
+    { "a",        "target"      },
+    { "img",      "src"         },
+    { "img",      "alt"         },
+    { "img",      "width"       },
+    { "img",      "height"      },
+    { "link",     "rel"         },
+    { "link",     "href"        },
+    { "link",     "type"        },
+    { "meta",     "charset"     },
+    { "meta",     "name"        },
+    { "meta",     "content"     },
+    { "input",    "type"        },
+    { "input",    "name"        },
+    { "input",    "value"       },
+    { "input",    "placeholder" },
+    { "form",     "action"      },
+    { "form",     "method"      },
+    { "button",   "type"        },
+    { "label",    "for"         },
+    { "textarea", "rows"        },
+    { "textarea", "cols"        },
+    { "td",       "colspan"     },
+    { "td",       "rowspan"     },
+    { "th",       "colspan"     },
+    { (const char *)0, "id"     },
+    { (const char *)0, "class"  },
+    { (const char *)0, "style"  },
 };
 
 static bool is_htm_file(void) {
