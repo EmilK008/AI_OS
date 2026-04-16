@@ -172,6 +172,199 @@ static int  picker_sel = 0;
 static int  picker_scroll = 0;
 #define PICKER_VISIBLE  10  /* max visible rows in picker */
 
+/* ---- HTML Autocomplete ---- */
+#define AC_MODE_TAG    0
+#define AC_MODE_ATTR   1
+#define AC_MODE_CLOSE  2
+#define AC_MAX_MATCHES 16
+#define AC_MAX_VISIBLE 6
+#define AC_POPUP_W     130
+#define AC_ITEM_H      16
+#define AC_PREFIX_MAX  15
+
+static bool ac_active = false;
+static int  ac_mode = AC_MODE_TAG;
+static char ac_prefix[AC_PREFIX_MAX + 1];
+static int  ac_prefix_len = 0;
+static int  ac_sel = 0;
+static int  ac_scroll = 0;
+static int  ac_matches[AC_MAX_MATCHES];
+static int  ac_match_count = 0;
+static char ac_tag_ctx[16]; /* tag name for attribute context */
+
+/* HTML tag database */
+#define HTML_TAG_COUNT 17
+static const char *html_tags[HTML_TAG_COUNT] = {
+    "a", "b", "br", "div", "em", "h1", "h2", "h3", "hr",
+    "i", "li", "ol", "p", "span", "strong", "u", "ul"
+};
+/* Void tags (self-closing, no </tag>) */
+static bool html_void_tag(const char *tag) {
+    return (str_eq(tag, "br") || str_eq(tag, "hr"));
+}
+
+/* Attribute database: tag -> attributes */
+#define HTML_ATTR_COUNT 5
+static const struct {
+    const char *tag;  /* NULL = generic (applies to all) */
+    const char *attr;
+} html_attrs[HTML_ATTR_COUNT] = {
+    { "a",    "href" },
+    { "img",  "src"  },
+    { "img",  "alt"  },
+    { (const char *)0, "id"    },
+    { (const char *)0, "class" },
+};
+
+static bool is_htm_file(void) {
+    if (filename_len < 4) return false;
+    /* Check .htm or .html ending */
+    if (filename[filename_len - 4] == '.' &&
+        (filename[filename_len - 3] == 'h' || filename[filename_len - 3] == 'H') &&
+        (filename[filename_len - 2] == 't' || filename[filename_len - 2] == 'T') &&
+        (filename[filename_len - 1] == 'm' || filename[filename_len - 1] == 'M'))
+        return true;
+    if (filename_len >= 5 &&
+        filename[filename_len - 5] == '.' &&
+        (filename[filename_len - 4] == 'h' || filename[filename_len - 4] == 'H') &&
+        (filename[filename_len - 3] == 't' || filename[filename_len - 3] == 'T') &&
+        (filename[filename_len - 2] == 'm' || filename[filename_len - 2] == 'M') &&
+        (filename[filename_len - 1] == 'l' || filename[filename_len - 1] == 'L'))
+        return true;
+    return false;
+}
+
+/* Case-insensitive prefix match */
+static bool ac_prefix_match(const char *candidate, const char *prefix, int plen) {
+    for (int i = 0; i < plen; i++) {
+        char a = candidate[i];
+        char b = prefix[i];
+        if (!a) return false;
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return false;
+    }
+    return true;
+}
+
+static void ac_update_matches(void) {
+    ac_match_count = 0;
+    ac_sel = 0;
+    ac_scroll = 0;
+
+    if (ac_mode == AC_MODE_TAG || ac_mode == AC_MODE_CLOSE) {
+        for (int i = 0; i < HTML_TAG_COUNT && ac_match_count < AC_MAX_MATCHES; i++) {
+            if (ac_prefix_len == 0 || ac_prefix_match(html_tags[i], ac_prefix, ac_prefix_len))
+                ac_matches[ac_match_count++] = i;
+        }
+    } else if (ac_mode == AC_MODE_ATTR) {
+        for (int i = 0; i < HTML_ATTR_COUNT && ac_match_count < AC_MAX_MATCHES; i++) {
+            /* Show attr if it's generic (tag==NULL) or matches current tag */
+            if (html_attrs[i].tag == (const char *)0 || str_eq(html_attrs[i].tag, ac_tag_ctx)) {
+                if (ac_prefix_len == 0 || ac_prefix_match(html_attrs[i].attr, ac_prefix, ac_prefix_len))
+                    ac_matches[ac_match_count++] = i;
+            }
+        }
+    }
+
+    if (ac_match_count == 0) ac_active = false;
+}
+
+static void ac_start(int mode_val) {
+    if (!is_htm_file()) return;
+    ac_active = true;
+    ac_mode = mode_val;
+    ac_prefix_len = 0;
+    ac_prefix[0] = '\0';
+    ac_tag_ctx[0] = '\0';
+    ac_update_matches();
+}
+
+/* Insert a string at cursor_pos */
+static void insert_string(const char *s) {
+    while (*s) {
+        if (text_len >= BUF_SIZE) break;
+        for (int i = text_len; i > cursor_pos; i--)
+            text_buf[i] = text_buf[i - 1];
+        text_buf[cursor_pos] = *s;
+        text_len++;
+        text_buf[text_len] = '\0';
+        cursor_pos++;
+        s++;
+    }
+    file_dirty = true;
+}
+
+/* Delete n chars before cursor */
+static void delete_before(int n) {
+    if (n > cursor_pos) n = cursor_pos;
+    cursor_pos -= n;
+    for (int i = cursor_pos; i < text_len - n; i++)
+        text_buf[i] = text_buf[i + n];
+    text_len -= n;
+    text_buf[text_len] = '\0';
+    file_dirty = true;
+}
+
+static void ac_accept(void) {
+    if (!ac_active || ac_match_count == 0) return;
+
+    /* Delete the prefix the user already typed */
+    delete_before(ac_prefix_len);
+
+    if (ac_mode == AC_MODE_TAG) {
+        const char *tag = html_tags[ac_matches[ac_sel]];
+        if (html_void_tag(tag)) {
+            /* Void: insert tagname> */
+            insert_string(tag);
+            insert_string(">");
+        } else {
+            /* Container: insert tagname></tagname> then move cursor back */
+            insert_string(tag);
+            insert_string(">");
+            int after_open = cursor_pos; /* save position after > */
+            insert_string("</");
+            insert_string(tag);
+            insert_string(">");
+            cursor_pos = after_open; /* position between >...</ tagname> */
+        }
+    } else if (ac_mode == AC_MODE_CLOSE) {
+        const char *tag = html_tags[ac_matches[ac_sel]];
+        insert_string(tag);
+        insert_string(">");
+    } else if (ac_mode == AC_MODE_ATTR) {
+        const char *attr = html_attrs[ac_matches[ac_sel]].attr;
+        insert_string(attr);
+        insert_string("=\"\"");
+        cursor_pos--; /* position between quotes */
+    }
+
+    ac_active = false;
+}
+
+/* Detect tag context: scan backwards from cursor to find the tag name
+   after the last unmatched '<'. Returns the tag name in out, or empty. */
+static void ac_find_tag_context(char *out, int max) {
+    out[0] = '\0';
+    int i = cursor_pos - 1;
+    /* Skip back past the space we just typed */
+    while (i >= 0 && text_buf[i] == ' ') i--;
+    /* Now collect tag name chars backwards */
+    int end = i + 1;
+    while (i >= 0 && text_buf[i] != '<' && text_buf[i] != '>' && text_buf[i] != ' ') i--;
+    if (i >= 0 && text_buf[i] == '<') {
+        int start = i + 1;
+        int len = end - start;
+        if (len > max - 1) len = max - 1;
+        for (int j = 0; j < len; j++) {
+            char c = text_buf[start + j];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            out[j] = c;
+        }
+        out[len] = '\0';
+    }
+}
+
 static void picker_refresh(void) {
     picker_count = 0;
     picker_sel = 0;
@@ -614,6 +807,58 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
         }
 
         /* Normal edit mode */
+
+        /* --- Autocomplete active: intercept keys --- */
+        if (ac_active) {
+            if (k == '\t' || k == '\n') {
+                ac_accept();
+                ensure_cursor_visible();
+                return;
+            }
+            if (k == 0x1B) { ac_active = false; return; }
+            if (k == KEY_UP) {
+                if (ac_sel > 0) ac_sel--;
+                if (ac_sel < ac_scroll) ac_scroll = ac_sel;
+                return;
+            }
+            if (k == KEY_DOWN) {
+                if (ac_sel < ac_match_count - 1) ac_sel++;
+                if (ac_sel >= ac_scroll + AC_MAX_VISIBLE)
+                    ac_scroll = ac_sel - AC_MAX_VISIBLE + 1;
+                return;
+            }
+            if (k == '\b') {
+                if (ac_prefix_len > 0) {
+                    ac_prefix_len--;
+                    ac_prefix[ac_prefix_len] = '\0';
+                    delete_char_back();
+                    ac_update_matches();
+                    ensure_cursor_visible();
+                } else {
+                    ac_active = false;
+                    delete_char_back();
+                    ensure_cursor_visible();
+                }
+                return;
+            }
+            if (k >= 0x20 && k < 0x80 && k != '<' && k != '>') {
+                if (ac_prefix_len < AC_PREFIX_MAX) {
+                    ac_prefix[ac_prefix_len++] = (char)k;
+                    ac_prefix[ac_prefix_len] = '\0';
+                    insert_char((char)k);
+                    ac_update_matches();
+                    ensure_cursor_visible();
+                } else {
+                    ac_active = false;
+                    insert_char((char)k);
+                    ensure_cursor_visible();
+                }
+                return;
+            }
+            /* For '>' or other special: dismiss and fall through */
+            ac_active = false;
+        }
+
         if (k == '\b') { delete_char_back(); ensure_cursor_visible(); return; }
         if (k == '\n') { insert_char('\n'); ensure_cursor_visible(); return; }
 
@@ -679,6 +924,28 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
         if (k >= 0x20 && k < 0x80) {
             insert_char((char)k);
             ensure_cursor_visible();
+
+            /* Autocomplete triggers for HTML files */
+            if (is_htm_file()) {
+                if ((char)k == '<') {
+                    ac_start(AC_MODE_TAG);
+                } else if ((char)k == '/' && cursor_pos >= 2 && text_buf[cursor_pos - 2] == '<') {
+                    /* Typed </ — closing tag mode */
+                    ac_start(AC_MODE_CLOSE);
+                } else if ((char)k == ' ') {
+                    /* Space inside a tag? Check if we're between < and unclosed > */
+                    char ctx[16];
+                    ac_find_tag_context(ctx, 16);
+                    if (ctx[0]) {
+                        ac_mode = AC_MODE_ATTR;
+                        ac_active = true;
+                        ac_prefix_len = 0;
+                        ac_prefix[0] = '\0';
+                        str_ncopy(ac_tag_ctx, ctx, 15);
+                        ac_update_matches();
+                    }
+                }
+            }
         }
         return;
     }
@@ -1012,6 +1279,71 @@ void notepad_render(void) {
                 int cy = text_y + screen_row * 16;
                 np_rect(buf, cw, ch, cx, cy, 2, 16, theme_cursor());
             }
+        }
+
+        /* Autocomplete popup */
+        if (ac_active && ac_match_count > 0 && mode == MODE_EDIT) {
+            int screen_row = cur_line - scroll_line;
+            int popup_x = text_x + cur_col * 8;
+            int popup_y = text_y + (screen_row + 1) * 16 + 2;
+
+            /* If popup would go below content area, show above cursor */
+            int visible = ac_match_count;
+            if (visible > AC_MAX_VISIBLE) visible = AC_MAX_VISIBLE;
+            int popup_h = visible * AC_ITEM_H + 4;
+            if (popup_y + popup_h > NP_H - STATUS_H) {
+                popup_y = text_y + screen_row * 16 - popup_h - 2;
+                if (popup_y < HEADER_H) popup_y = HEADER_H;
+            }
+            /* Clamp horizontal */
+            if (popup_x + AC_POPUP_W > NP_W - 4) popup_x = NP_W - 4 - AC_POPUP_W;
+            if (popup_x < 4) popup_x = 4;
+
+            /* Background + border */
+            np_rect(buf, cw, ch, popup_x, popup_y, AC_POPUP_W, popup_h, COLOR_RGB(35, 35, 48));
+            np_rect(buf, cw, ch, popup_x, popup_y, AC_POPUP_W, 1, COLOR_RGB(80, 120, 200));
+            np_rect(buf, cw, ch, popup_x, popup_y + popup_h - 1, AC_POPUP_W, 1, COLOR_RGB(80, 120, 200));
+            np_rect(buf, cw, ch, popup_x, popup_y, 1, popup_h, COLOR_RGB(80, 120, 200));
+            np_rect(buf, cw, ch, popup_x + AC_POPUP_W - 1, popup_y, 1, popup_h, COLOR_RGB(80, 120, 200));
+
+            for (int i = 0; i < visible; i++) {
+                int idx = ac_scroll + i;
+                if (idx >= ac_match_count) break;
+                int iy = popup_y + 2 + i * AC_ITEM_H;
+                color_t row_bg = (idx == ac_sel) ? COLOR_RGB(50, 70, 140) : COLOR_RGB(35, 35, 48);
+                np_rect(buf, cw, ch, popup_x + 2, iy, AC_POPUP_W - 4, AC_ITEM_H, row_bg);
+
+                const char *label;
+                if (ac_mode == AC_MODE_ATTR)
+                    label = html_attrs[ac_matches[idx]].attr;
+                else
+                    label = html_tags[ac_matches[idx]];
+
+                /* Tag icon/prefix */
+                if (ac_mode == AC_MODE_TAG) {
+                    np_text(buf, cw, ch, popup_x + 6, iy, "<", COLOR_RGB(100, 160, 220), row_bg);
+                    np_text(buf, cw, ch, popup_x + 14, iy, label, COLOR_WHITE, row_bg);
+                    np_text(buf, cw, ch, popup_x + 14 + str_len(label) * 8, iy, ">",
+                            COLOR_RGB(100, 160, 220), row_bg);
+                } else if (ac_mode == AC_MODE_CLOSE) {
+                    np_text(buf, cw, ch, popup_x + 6, iy, "/", COLOR_RGB(100, 160, 220), row_bg);
+                    np_text(buf, cw, ch, popup_x + 14, iy, label, COLOR_WHITE, row_bg);
+                    np_text(buf, cw, ch, popup_x + 14 + str_len(label) * 8, iy, ">",
+                            COLOR_RGB(100, 160, 220), row_bg);
+                } else {
+                    np_text(buf, cw, ch, popup_x + 6, iy, label, COLOR_RGB(180, 220, 255), row_bg);
+                    np_text(buf, cw, ch, popup_x + 6 + str_len(label) * 8 + 4, iy, "=\"\"",
+                            COLOR_RGB(100, 100, 120), row_bg);
+                }
+            }
+
+            /* Scroll indicators */
+            if (ac_scroll > 0)
+                np_text(buf, cw, ch, popup_x + AC_POPUP_W - 12, popup_y + 2, "^",
+                        COLOR_RGB(120, 120, 140), COLOR_RGB(35, 35, 48));
+            if (ac_scroll + visible < ac_match_count)
+                np_text(buf, cw, ch, popup_x + AC_POPUP_W - 12, popup_y + popup_h - AC_ITEM_H - 2, "v",
+                        COLOR_RGB(120, 120, 140), COLOR_RGB(35, 35, 48));
         }
     }
 
