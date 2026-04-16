@@ -121,6 +121,15 @@ void kernel_main(void) {
             /* Process all pending events */
             struct gui_event evt;
             while (event_pop(&evt)) {
+                /* Ctrl+R: global hotkey to reset UI scale to 1x */
+                if (evt.type == EVT_KEY_PRESS && evt.key == 18) {
+                    if (fb_get_scale() != 100) {
+                        fb_set_scale(100);
+                        mouse_set_bounds(fb_get_width(), fb_get_height());
+                        mouse_clamp();
+                    }
+                    continue;
+                }
                 wm_handle_event(&evt);
             }
 

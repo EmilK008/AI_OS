@@ -32,10 +32,16 @@
 #define BGA_LFB_ADDRESS 0xE0000000
 
 static uint32_t screen_width, screen_height, screen_pitch, screen_bpp;
+static uint32_t phys_width, phys_height;
+static int      scale_pct = 100;  /* 100 = 1x, 125 = 1.25x, 150 = 1.5x, 200 = 2x */
 static color_t *vram;
 static color_t *backbuf;
 static uint32_t fb_size;
 static bool     initialized = false;
+
+/* Precomputed x-mapping table for upscaling: phys_x -> virtual_x */
+#define MAX_PHYS_W 1920
+static uint16_t x_map[MAX_PHYS_W];
 
 static void bga_write(uint16_t index, uint16_t value) {
     outw(VBE_DISPI_IOPORT_INDEX, index);
@@ -64,6 +70,34 @@ static inline void fast_memset32(void *dst, uint32_t val, uint32_t count) {
         : "a"(val)
         : "memory"
     );
+}
+
+static void rebuild_x_map(void) {
+    for (uint32_t px = 0; px < phys_width && px < MAX_PHYS_W; px++)
+        x_map[px] = (uint16_t)(px * screen_width / phys_width);
+}
+
+/* Recompute virtual (logical) dimensions from physical + scale, reallocate backbuf */
+static bool recompute_virtual(void) {
+    uint32_t vw = phys_width  * 100 / (uint32_t)scale_pct;
+    uint32_t vh = phys_height * 100 / (uint32_t)scale_pct;
+    if (vw < 320) vw = 320;
+    if (vh < 240) vh = 240;
+
+    uint32_t new_size = vw * vh * sizeof(color_t);
+    color_t *new_buf = (color_t *)kmalloc(new_size);
+    if (!new_buf) return false;
+    mem_set(new_buf, 0, new_size);
+
+    if (backbuf) kfree(backbuf);
+    backbuf = new_buf;
+    fb_size = new_size;
+    screen_width  = vw;
+    screen_height = vh;
+    screen_pitch  = vw * 4;
+
+    rebuild_x_map();
+    return true;
 }
 
 /* Read 32-bit value from PCI configuration space */
@@ -125,6 +159,9 @@ void fb_init(void) {
 
     screen_width  = 640;
     screen_height = 480;
+    phys_width    = 640;
+    phys_height   = 480;
+    scale_pct     = 100;
     screen_bpp    = 32;
     screen_pitch  = screen_width * 4;
     vram          = (color_t *)bar0;
@@ -235,7 +272,19 @@ void fb_blit(int dst_x, int dst_y, int w, int h, const color_t *src, int src_pit
 
 void fb_flip(void) {
     if (!initialized) return;
-    fast_memcpy32(vram, backbuf, fb_size);
+    if (scale_pct == 100) {
+        /* No scaling — direct copy */
+        fast_memcpy32(vram, backbuf, fb_size);
+    } else {
+        /* Nearest-neighbor upscale from virtual backbuf to physical VRAM */
+        for (uint32_t py = 0; py < phys_height; py++) {
+            uint32_t vy = py * screen_height / phys_height;
+            const color_t *src_row = backbuf + vy * screen_width;
+            color_t *dst_row = vram + py * phys_width;
+            for (uint32_t px = 0; px < phys_width; px++)
+                dst_row[px] = src_row[x_map[px]];
+        }
+    }
 }
 
 void fb_clear(color_t color) {
@@ -245,19 +294,15 @@ void fb_clear(color_t color) {
 
 int fb_get_width(void)  { return (int)screen_width; }
 int fb_get_height(void) { return (int)screen_height; }
+int fb_get_phys_width(void)  { return (int)phys_width; }
+int fb_get_phys_height(void) { return (int)phys_height; }
 color_t *fb_get_backbuf(void) { return backbuf; }
 
 bool fb_set_mode(int width, int height) {
     if (!initialized) return false;
-    if (width == (int)screen_width && height == (int)screen_height) return true;
+    if (width == (int)phys_width && height == (int)phys_height) return true;
 
-    /* Allocate new back buffer before touching hardware */
-    uint32_t new_size = (uint32_t)width * (uint32_t)height * sizeof(color_t);
-    color_t *new_buf = (color_t *)kmalloc(new_size);
-    if (!new_buf) return false;
-    mem_set(new_buf, 0, new_size);
-
-    /* Reprogram BGA hardware */
+    /* Reprogram BGA hardware to new physical resolution */
     bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
     bga_write(VBE_DISPI_INDEX_XRES, (uint16_t)width);
     bga_write(VBE_DISPI_INDEX_YRES, (uint16_t)height);
@@ -268,13 +313,28 @@ bool fb_set_mode(int width, int height) {
     bga_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
     bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
 
-    /* Free old back buffer and switch to new one */
-    kfree(backbuf);
-    backbuf = new_buf;
-    fb_size = new_size;
-    screen_width  = (uint32_t)width;
-    screen_height = (uint32_t)height;
-    screen_pitch  = screen_width * 4;
+    phys_width  = (uint32_t)width;
+    phys_height = (uint32_t)height;
 
+    /* Recompute virtual dims + backbuf based on current scale */
+    if (!recompute_virtual()) return false;
     return true;
+}
+
+bool fb_set_scale(int pct) {
+    if (!initialized) return false;
+    if (pct != 100 && pct != 125 && pct != 150 && pct != 200) return false;
+    if (pct == scale_pct) return true;
+
+    /* Reject if virtual resolution would be too small for the UI */
+    uint32_t vw = phys_width  * 100 / (uint32_t)pct;
+    uint32_t vh = phys_height * 100 / (uint32_t)pct;
+    if (vw < 640 || vh < 480) return false;
+
+    scale_pct = pct;
+    return recompute_virtual();
+}
+
+int fb_get_scale(void) {
+    return scale_pct;
 }

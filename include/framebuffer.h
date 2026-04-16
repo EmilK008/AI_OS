@@ -37,7 +37,11 @@ void    fb_flip(void);
 void    fb_clear(color_t color);
 int     fb_get_width(void);
 int     fb_get_height(void);
+int     fb_get_phys_width(void);
+int     fb_get_phys_height(void);
 color_t *fb_get_backbuf(void);
 bool    fb_set_mode(int width, int height);
+bool    fb_set_scale(int scale_pct);
+int     fb_get_scale(void);
 
 #endif

@@ -136,6 +136,7 @@ void keyboard_handler(void) {
                 else if (c == 'q' || c == 'Q') c = 17;  /* Ctrl+Q */
                 else if (c == 'z' || c == 'Z') c = 26;  /* SUB - Ctrl+Z */
                 else if (c == 'y' || c == 'Y') c = 25;  /* EM  - Ctrl+Y */
+                else if (c == 'r' || c == 'R') c = 18;  /* DC2 - Ctrl+R */
             }
 
             if (c != 0) {

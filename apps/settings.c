@@ -15,7 +15,7 @@
 #include "keyboard.h"
 
 #define SET_W        340
-#define SET_H        310
+#define SET_H        360
 #define SIDEBAR_W    80
 #define TAB_H        28
 #define TAB_COUNT    4
@@ -241,7 +241,7 @@ void settings_save(void) {
     plen = str_len(prefix);
     mem_copy(buf + pos, prefix, plen); pos += plen;
     char nbuf[8];
-    set_itoa(fb_get_width(), nbuf);
+    set_itoa(fb_get_phys_width(), nbuf);
     int nlen = str_len(nbuf);
     mem_copy(buf + pos, nbuf, nlen); pos += nlen;
     buf[pos++] = '\n';
@@ -250,7 +250,16 @@ void settings_save(void) {
     prefix = "res_h=";
     plen = str_len(prefix);
     mem_copy(buf + pos, prefix, plen); pos += plen;
-    set_itoa(fb_get_height(), nbuf);
+    set_itoa(fb_get_phys_height(), nbuf);
+    nlen = str_len(nbuf);
+    mem_copy(buf + pos, nbuf, nlen); pos += nlen;
+    buf[pos++] = '\n';
+
+    /* scale=NNN */
+    prefix = "scale=";
+    plen = str_len(prefix);
+    mem_copy(buf + pos, prefix, plen); pos += plen;
+    set_itoa(fb_get_scale(), nbuf);
     nlen = str_len(nbuf);
     mem_copy(buf + pos, nbuf, nlen); pos += nlen;
     buf[pos++] = '\n';
@@ -315,6 +324,7 @@ void settings_load(void) {
     /* Parse line by line */
     char *p = buf;
     int load_res_w = 0, load_res_h = 0;
+    int load_scale = 0;
     while (*p) {
         /* Find end of line */
         char *line = p;
@@ -360,14 +370,23 @@ void settings_load(void) {
         else if (str_starts_with(line, "res_h=")) {
             load_res_h = str_to_int(line + 6);
         }
+        else if (str_starts_with(line, "scale=")) {
+            load_scale = str_to_int(line + 6);
+        }
     }
 
     /* Apply resolution if both values were found */
     if (load_res_w > 0 && load_res_h > 0) {
-        if (fb_set_mode(load_res_w, load_res_h)) {
-            mouse_set_bounds(fb_get_width(), fb_get_height());
-        }
+        fb_set_mode(load_res_w, load_res_h);
     }
+
+    /* Apply scale */
+    if (load_scale > 0) {
+        fb_set_scale(load_scale);
+    }
+
+    /* Update mouse bounds to match final virtual resolution */
+    mouse_set_bounds(fb_get_width(), fb_get_height());
 
     /* Restore cwd */
     fs_change_dir("/");
@@ -505,6 +524,28 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
                 int by = res_y + r * (rbtn_h + row_gap);
                 if (px >= bx && px < bx + rbtn_w && py >= by && py < by + rbtn_h) {
                     if (fb_set_mode(res_widths[i], res_heights[i])) {
+                        mouse_set_bounds(fb_get_width(), fb_get_height());
+                        mouse_clamp();
+                        settings_save();
+                    }
+                }
+            }
+        }
+
+        /* Scale buttons */
+        {
+            int res_y = wp_btn_y + btn_h + 36;
+            int rbtn_h2 = 22;
+            int row_gap2 = 4;
+            int scale_y = res_y + 2 * (rbtn_h2 + row_gap2) + 24;
+            int sbtn_w = 52;
+            int sbtn_h = 22;
+            int sbtn_gap = 4;
+            static const int scale_vals[4] = { 100, 125, 150, 200 };
+            for (int i = 0; i < 4; i++) {
+                int bx = 12 + i * (sbtn_w + sbtn_gap);
+                if (px >= bx && px < bx + sbtn_w && py >= scale_y && py < scale_y + sbtn_h) {
+                    if (fb_set_scale(scale_vals[i])) {
                         mouse_set_bounds(fb_get_width(), fb_get_height());
                         mouse_clamp();
                         settings_save();
@@ -657,8 +698,8 @@ void settings_render(void) {
             int rbtn_h = 22;
             int rbtn_gap = 4;
             int row_gap = 4;
-            int cur_w = fb_get_width();
-            int cur_h = fb_get_height();
+            int cur_w = fb_get_phys_width();
+            int cur_h = fb_get_phys_height();
             for (int i = 0; i < RES_COUNT; i++) {
                 int r = i / 3;
                 int c = i % 3;
@@ -670,6 +711,31 @@ void settings_render(void) {
                 int tlen = str_len(res_labels[i]);
                 int tx = bx + (rbtn_w - tlen * 8) / 2;
                 set_text(buf, cw, ch, tx, by + 3, res_labels[i], C_TEXT, bc);
+            }
+        }
+
+        /* Scale label + buttons */
+        {
+            int res_y = info_y + 14;
+            int rbtn_h2 = 22;
+            int row_gap2 = 4;
+            int scale_y = res_y + 2 * (rbtn_h2 + row_gap2) + 10;
+            set_text_nobg(buf, cw, ch, px0, scale_y, "UI Scale:", C_TEXT);
+            scale_y += 14;
+
+            int sbtn_w = 52;
+            int sbtn_h = 22;
+            int sbtn_gap = 4;
+            int cur_scale = fb_get_scale();
+            static const int scale_vals[4] = { 100, 125, 150, 200 };
+            static const char *scale_labels[4] = { "1x", "1.25x", "1.5x", "2x" };
+            for (int i = 0; i < 4; i++) {
+                int bx = grid_x + i * (sbtn_w + sbtn_gap);
+                color_t bc = (cur_scale == scale_vals[i]) ? C_BTN_ACT : C_BTN;
+                set_rect(buf, cw, ch, bx, scale_y, sbtn_w, sbtn_h, bc);
+                int tlen = str_len(scale_labels[i]);
+                int tx = bx + (sbtn_w - tlen * 8) / 2;
+                set_text(buf, cw, ch, tx, scale_y + 3, scale_labels[i], C_TEXT, bc);
             }
         }
         break;
