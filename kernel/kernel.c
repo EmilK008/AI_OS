@@ -98,6 +98,11 @@ void kernel_main(void) {
         desktop_init();
         dbg_print("GUI: wm\n");
         wm_init();
+
+        /* Restore saved settings (bg color, wallpaper, mouse speed, clock) */
+        settings_load();
+        dbg_print("GUI: settings loaded\n");
+
         dbg_print("GUI: terminal\n");
         terminal_create();
         dbg_print("GUI: modes\n");

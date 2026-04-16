@@ -155,6 +155,240 @@ static void set_itoa(int val, char *buf) {
     buf[j] = '\0';
 }
 
+/* --- Hex conversion helpers for color persistence --- */
+
+static uint32_t hex_digit(char c) {
+    if (c >= '0' && c <= '9') return (uint32_t)(c - '0');
+    if (c >= 'a' && c <= 'f') return (uint32_t)(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F') return (uint32_t)(c - 'A' + 10);
+    return 0;
+}
+
+static uint32_t hex_to_u32(const char *s) {
+    uint32_t v = 0;
+    while (*s) { v = (v << 4) | hex_digit(*s); s++; }
+    return v;
+}
+
+static void u32_to_hex(uint32_t v, char *buf) {
+    static const char hx[] = "0123456789abcdef";
+    for (int i = 5; i >= 0; i--) {
+        buf[i] = hx[v & 0xF];
+        v >>= 4;
+    }
+    buf[6] = '\0';
+}
+
+/* --- Settings persistence --- */
+
+#define SETTINGS_PATH "settings.conf"
+
+void settings_save(void) {
+    /* Navigate to /etc, save cwd */
+    int saved_cwd = fs_get_cwd();
+    fs_change_dir("/");
+    if (fs_change_dir("etc") != 0) {
+        fs_change_dir("/");
+        if (saved_cwd >= 0) {
+            /* Restore cwd by index directly — change_dir only takes names */
+        }
+        return;
+    }
+
+    /* Build settings string */
+    char buf[320];
+    int pos = 0;
+
+    /* bg_color=RRGGBB */
+    color_t bg = desktop_get_bg();
+    uint32_t rgb = ((bg >> 16) & 0xFF) << 16 | ((bg >> 8) & 0xFF) << 8 | (bg & 0xFF);
+    char hexbuf[8];
+    u32_to_hex(rgb, hexbuf);
+
+    const char *prefix = "bg_color=";
+    int plen = str_len(prefix);
+    mem_copy(buf + pos, prefix, plen); pos += plen;
+    mem_copy(buf + pos, hexbuf, 6); pos += 6;
+    buf[pos++] = '\n';
+
+    /* wallpaper=filename (or empty) */
+    const char *wp = desktop_get_wallpaper_name();
+    prefix = "wallpaper=";
+    plen = str_len(prefix);
+    mem_copy(buf + pos, prefix, plen); pos += plen;
+    if (wp) {
+        int wlen = str_len(wp);
+        mem_copy(buf + pos, wp, wlen); pos += wlen;
+    }
+    buf[pos++] = '\n';
+
+    /* mouse_speed=N */
+    prefix = "mouse_speed=";
+    plen = str_len(prefix);
+    mem_copy(buf + pos, prefix, plen); pos += plen;
+    buf[pos++] = '0' + (char)mouse_get_speed();
+    buf[pos++] = '\n';
+
+    /* clock_24h=0|1 */
+    prefix = "clock_24h=";
+    plen = str_len(prefix);
+    mem_copy(buf + pos, prefix, plen); pos += plen;
+    buf[pos++] = rtc_get_24h() ? '1' : '0';
+    buf[pos++] = '\n';
+
+    /* res_w=NNN */
+    prefix = "res_w=";
+    plen = str_len(prefix);
+    mem_copy(buf + pos, prefix, plen); pos += plen;
+    char nbuf[8];
+    set_itoa(fb_get_width(), nbuf);
+    int nlen = str_len(nbuf);
+    mem_copy(buf + pos, nbuf, nlen); pos += nlen;
+    buf[pos++] = '\n';
+
+    /* res_h=NNN */
+    prefix = "res_h=";
+    plen = str_len(prefix);
+    mem_copy(buf + pos, prefix, plen); pos += plen;
+    set_itoa(fb_get_height(), nbuf);
+    nlen = str_len(nbuf);
+    mem_copy(buf + pos, nbuf, nlen); pos += nlen;
+    buf[pos++] = '\n';
+
+    buf[pos] = '\0';
+
+    /* Write to filesystem */
+    int idx = fs_find(SETTINGS_PATH);
+    if (idx < 0) {
+        idx = fs_create(SETTINGS_PATH, FS_FILE);
+    }
+    if (idx >= 0) {
+        fs_write_file(idx, buf, (uint32_t)pos);
+    }
+
+    /* Restore cwd */
+    fs_change_dir("/");
+    /* Walk back to saved_cwd */
+    if (saved_cwd > 0) {
+        char path_buf[128];
+        fs_get_path(saved_cwd, path_buf, 128);
+        /* Navigate to the saved path */
+        if (path_buf[0] == '/') {
+            char *p = path_buf + 1; /* skip leading / */
+            while (*p) {
+                char comp[MAX_FILENAME];
+                int ci = 0;
+                while (*p && *p != '/' && ci < MAX_FILENAME - 1)
+                    comp[ci++] = *p++;
+                comp[ci] = '\0';
+                if (*p == '/') p++;
+                if (ci > 0) fs_change_dir(comp);
+            }
+        }
+    }
+}
+
+void settings_load(void) {
+    /* Navigate to /etc */
+    int saved_cwd = fs_get_cwd();
+    fs_change_dir("/");
+    if (fs_change_dir("etc") != 0) {
+        fs_change_dir("/");
+        return;
+    }
+
+    int idx = fs_find(SETTINGS_PATH);
+    if (idx < 0) {
+        /* No settings file — use defaults */
+        fs_change_dir("/");
+        return;
+    }
+
+    char buf[256];
+    int len = fs_read_file(idx, buf, 255);
+    if (len <= 0) {
+        fs_change_dir("/");
+        return;
+    }
+    buf[len] = '\0';
+
+    /* Parse line by line */
+    char *p = buf;
+    int load_res_w = 0, load_res_h = 0;
+    while (*p) {
+        /* Find end of line */
+        char *line = p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') { *p = '\0'; p++; }
+
+        if (str_starts_with(line, "bg_color=")) {
+            uint32_t rgb = hex_to_u32(line + 9);
+            color_t c = COLOR_RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+            desktop_set_bg(c);
+        }
+        else if (str_starts_with(line, "wallpaper=")) {
+            const char *fname = line + 10;
+            if (*fname) {
+                /* Navigate to likely wallpaper locations to find the file */
+                fs_change_dir("/");
+                /* Try root first, then /home */
+                if (fs_find(fname) >= 0) {
+                    desktop_set_wallpaper(fname);
+                } else {
+                    if (fs_change_dir("home") == 0) {
+                        if (fs_find(fname) >= 0) {
+                            desktop_set_wallpaper(fname);
+                        }
+                    }
+                }
+                /* Return to /etc for remaining parsing */
+                fs_change_dir("/");
+                fs_change_dir("etc");
+            }
+        }
+        else if (str_starts_with(line, "mouse_speed=")) {
+            int speed = str_to_int(line + 12);
+            if (speed >= 1 && speed <= 3)
+                mouse_set_speed(speed);
+        }
+        else if (str_starts_with(line, "clock_24h=")) {
+            rtc_set_24h(line[10] == '1');
+        }
+        else if (str_starts_with(line, "res_w=")) {
+            load_res_w = str_to_int(line + 6);
+        }
+        else if (str_starts_with(line, "res_h=")) {
+            load_res_h = str_to_int(line + 6);
+        }
+    }
+
+    /* Apply resolution if both values were found */
+    if (load_res_w > 0 && load_res_h > 0) {
+        if (fb_set_mode(load_res_w, load_res_h)) {
+            mouse_set_bounds(fb_get_width(), fb_get_height());
+        }
+    }
+
+    /* Restore cwd */
+    fs_change_dir("/");
+    if (saved_cwd > 0) {
+        char path_buf[128];
+        fs_get_path(saved_cwd, path_buf, 128);
+        if (path_buf[0] == '/') {
+            char *cp = path_buf + 1;
+            while (*cp) {
+                char comp[MAX_FILENAME];
+                int ci = 0;
+                while (*cp && *cp != '/' && ci < MAX_FILENAME - 1)
+                    comp[ci++] = *cp++;
+                comp[ci] = '\0';
+                if (*cp == '/') cp++;
+                if (ci > 0) fs_change_dir(comp);
+            }
+        }
+    }
+}
+
 /* --- Event handler --- */
 
 static void settings_on_event(struct window *win, struct gui_event *evt) {
@@ -177,7 +411,7 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
             }
             if (k == '\n' && picker_count > 0) {
                 struct fs_node *f = fs_get_node(picker_entries[picker_sel]);
-                if (f) desktop_set_wallpaper(f->name);
+                if (f) { desktop_set_wallpaper(f->name); settings_save(); }
                 mode = MODE_NORMAL;
                 return;
             }
@@ -204,7 +438,7 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
             int idx = (my - list_y) / 18 + picker_scroll;
             if (idx >= 0 && idx < picker_count) {
                 struct fs_node *f = fs_get_node(picker_entries[idx]);
-                if (f) desktop_set_wallpaper(f->name);
+                if (f) { desktop_set_wallpaper(f->name); settings_save(); }
                 mode = MODE_NORMAL;
             }
             return;
@@ -235,8 +469,10 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
         int row = (py - grid_y) / (swatch + gap);
         if (col >= 0 && col < cols && row >= 0 && row < BG_COLORS / cols) {
             int idx = row * cols + col;
-            if (idx < BG_COLORS)
+            if (idx < BG_COLORS) {
                 desktop_set_bg(bg_palette[idx]);
+                settings_save();
+            }
         }
 
         /* Wallpaper buttons below color grid */
@@ -252,6 +488,7 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
         if (px >= 12 + btn_w + 8 && px < 12 + 2 * btn_w + 8 &&
             py >= wp_btn_y && py < wp_btn_y + btn_h) {
             desktop_clear_wallpaper();
+            settings_save();
         }
 
         /* Resolution buttons (2 rows: 3 + 2) */
@@ -270,6 +507,7 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
                     if (fb_set_mode(res_widths[i], res_heights[i])) {
                         mouse_set_bounds(fb_get_width(), fb_get_height());
                         mouse_clamp();
+                        settings_save();
                     }
                 }
             }
@@ -285,6 +523,7 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
             int bx = 12 + i * (btn_w + btn_gap);
             if (px >= bx && px < bx + btn_w && py >= btn_y && py < btn_y + btn_h) {
                 mouse_set_speed(i + 1);
+                settings_save();
             }
         }
         break;
@@ -296,10 +535,12 @@ static void settings_on_event(struct window *win, struct gui_event *evt) {
         int btn_gap = 12;
         if (px >= 12 && px < 12 + btn_w && py >= btn_y && py < btn_y + btn_h) {
             rtc_set_24h(true);
+            settings_save();
         }
         if (px >= 12 + btn_w + btn_gap && px < 12 + 2 * btn_w + btn_gap &&
             py >= btn_y && py < btn_y + btn_h) {
             rtc_set_24h(false);
+            settings_save();
         }
         break;
     }

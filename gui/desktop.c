@@ -16,6 +16,7 @@ static uint8_t *wallpaper;
 static int wp_w;
 static int wp_h;
 static bool wp_active;  /* BSS — defaults to false */
+static char wp_filename[32]; /* last wallpaper filename for settings persistence */
 
 /* Paint palette (matches apps/paint.c) for decoding .pic files */
 #define PIC_PAL_COUNT 16
@@ -101,6 +102,8 @@ void desktop_set_wallpaper(const char *filename) {
     wp_w = w;
     wp_h = h;
     wp_active = true;
+    /* Remember filename for settings persistence */
+    str_copy(wp_filename, filename);
     dbg_print("WP: set OK\n");
 }
 
@@ -111,11 +114,16 @@ void desktop_clear_wallpaper(void) {
         wp_w = 0;
         wp_h = 0;
         wp_active = false;
+        wp_filename[0] = '\0';
     }
 }
 
 bool desktop_has_wallpaper(void) {
     return wp_active;
+}
+
+const char *desktop_get_wallpaper_name(void) {
+    return wp_active ? wp_filename : (const char *)0;
 }
 
 void desktop_draw_background(void) {

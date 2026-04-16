@@ -12,5 +12,6 @@ color_t desktop_get_bg(void);
 void desktop_set_wallpaper(const char *filename);
 void desktop_clear_wallpaper(void);
 bool desktop_has_wallpaper(void);
+const char *desktop_get_wallpaper_name(void);
 
 #endif
