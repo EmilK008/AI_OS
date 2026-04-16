@@ -27,6 +27,7 @@
 #include "notepad.h"
 #include "paint.h"
 #include "settings.h"
+#include "taskmanager.h"
 #include "ata.h"
 
 /* Minimal debug output via QEMU debug port (0xE9) */
@@ -141,6 +142,7 @@ void kernel_main(void) {
             notepad_render();
             paint_render();
             settings_render();
+            taskmanager_render();
             wm_render_all();
 
             /* Yield CPU until next interrupt */

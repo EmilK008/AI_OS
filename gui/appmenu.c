@@ -10,13 +10,14 @@
 #include "notepad.h"
 #include "paint.h"
 #include "settings.h"
+#include "taskmanager.h"
 #include "shell.h"
 #include "process.h"
 
 #define MENU_X       2
 #define MENU_ITEM_W  120
 #define MENU_ITEM_H  22
-#define MENU_ITEMS   7
+#define MENU_ITEMS   8
 #define MENU_PAD     2
 
 static bool menu_open = false;
@@ -29,6 +30,7 @@ static const char *menu_labels[MENU_ITEMS] = {
     "Calculator",
     "Snake",
     "Settings",
+    "Tasks",
 };
 
 static int menu_y(void) {
@@ -81,6 +83,9 @@ void appmenu_on_click(int item) {
         break;
     case 6: /* Settings */
         settings_create();
+        break;
+    case 7: /* Tasks */
+        taskmanager_create();
         break;
     }
 }
