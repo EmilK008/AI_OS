@@ -180,7 +180,7 @@ static void snake_on_event(struct window *win, struct gui_event *evt) {
 void snake_window_create(void) {
     if (win_id >= 0) {
         struct window *w = wm_get_window(win_id);
-        if (w && w->alive) { wm_focus_window(win_id); return; }
+        if (w && w->alive && w->on_event == snake_on_event) { wm_focus_window(win_id); return; }
     }
     win_id = wm_create_window("Snake", 150, 50, CONTENT_W, CONTENT_H,
                                snake_on_event, NULL);
@@ -196,7 +196,7 @@ bool snake_window_is_alive(void) {
 void snake_window_render(void) {
     if (win_id < 0) return;
     struct window *win = wm_get_window(win_id);
-    if (!win || !win->alive || !win->content) { win_id = -1; return; }
+    if (!win || !win->alive || !win->content || win->on_event != snake_on_event) { win_id = -1; return; }
 
     int cw = win->content_w;
     int ch = win->content_h;

@@ -614,7 +614,7 @@ static void paint_on_event(struct window *win, struct gui_event *evt) {
 void paint_create(void) {
     if (win_id >= 0) {
         struct window *w = wm_get_window(win_id);
-        if (w && w->alive) { wm_focus_window(win_id); return; }
+        if (w && w->alive && w->on_event == paint_on_event) { wm_focus_window(win_id); return; }
     }
     /* Allocate canvas if first open */
     if (!canvas) {
@@ -644,7 +644,7 @@ bool paint_is_alive(void) {
 void paint_render(void) {
     if (win_id < 0) return;
     struct window *win = wm_get_window(win_id);
-    if (!win || !win->alive || !win->content) { win_id = -1; return; }
+    if (!win || !win->alive || !win->content || win->on_event != paint_on_event) { win_id = -1; return; }
 
     int cw = win->content_w;
     int ch = win->content_h;

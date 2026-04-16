@@ -127,7 +127,7 @@ void terminal_set_cursor_redirect(int x, int y) {
 bool terminal_is_alive(void) {
     if (term_window_id < 0) return false;
     struct window *win = wm_get_window(term_window_id);
-    return (win && win->alive);
+    return (win && win->alive && win->on_event == terminal_on_event);
 }
 
 void terminal_reopen(void) {
@@ -136,7 +136,10 @@ void terminal_reopen(void) {
 
 void terminal_render(void) {
     struct window *win = wm_get_window(term_window_id);
-    if (!win || !win->content) return;
+    if (!win || !win->content || win->on_event != terminal_on_event) {
+        term_window_id = -1;
+        return;
+    }
 
     int cw = win->content_w;
 
