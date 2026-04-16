@@ -28,6 +28,7 @@
 #include "paint.h"
 #include "settings.h"
 #include "taskmanager.h"
+#include "browser.h"
 #include "ata.h"
 
 /* Minimal debug output via QEMU debug port (0xE9) */
@@ -143,6 +144,7 @@ void kernel_main(void) {
             paint_render();
             settings_render();
             taskmanager_render();
+            browser_render();
             wm_render_all();
 
             /* Yield CPU until next interrupt */

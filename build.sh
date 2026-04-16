@@ -67,6 +67,7 @@ $CC $CFLAGS apps/notepad.c     -o "$BUILD_DIR/notepad.o"
 $CC $CFLAGS apps/paint.c      -o "$BUILD_DIR/paint.o"
 $CC $CFLAGS apps/settings.c   -o "$BUILD_DIR/settings.o"
 $CC $CFLAGS apps/taskmanager.c -o "$BUILD_DIR/taskmanager.o"
+$CC $CFLAGS apps/browser.c    -o "$BUILD_DIR/browser.o"
 # GUI
 $CC $CFLAGS gui/font_data.c    -o "$BUILD_DIR/font_data.o"
 $CC $CFLAGS gui/event.c        -o "$BUILD_DIR/event.o"
@@ -98,6 +99,7 @@ $LD $LDFLAGS \
     "$BUILD_DIR/paint.o" \
     "$BUILD_DIR/settings.o" \
     "$BUILD_DIR/taskmanager.o" \
+    "$BUILD_DIR/browser.o" \
     "$BUILD_DIR/speaker.o" \
     "$BUILD_DIR/framebuffer.o" \
     "$BUILD_DIR/mouse.o" \

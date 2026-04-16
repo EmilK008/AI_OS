@@ -70,6 +70,29 @@ void fs_init_defaults(void) {
         }
         cwd_idx = old_cwd;
     }
+
+    /* Create default browser home page */
+    int home = fs_create("home.htm", FS_FILE);
+    if (home >= 0) {
+        const char *htm =
+            "<h1>Welcome to AI_OS</h1>"
+            "<p>This is the <b>AI_OS Browser</b> - a simple HTML viewer for local files.</p>"
+            "<h2>Features</h2>"
+            "<ul>"
+            "<li>View local HTML files from the filesystem</li>"
+            "<li>Basic formatting: <b>bold</b>, <i>italic</i>, <u>underline</u></li>"
+            "<li>Headings, paragraphs, lists, and links</li>"
+            "<li>Navigate between pages with clickable links</li>"
+            "</ul>"
+            "<hr>"
+            "<h2>Getting Started</h2>"
+            "<p>Create HTML files in <b>Notepad</b> and view them here!</p>"
+            "<p>Use the address bar to type a filename, or click links to navigate.</p>"
+            "<p>Press <b>Backspace</b> to go back. Use <b>PgUp/PgDn</b> to scroll.</p>"
+            "<hr>"
+            "<p>Try viewing: <a href=\"readme.txt\">readme.txt</a></p>";
+        fs_write_file(home, htm, str_len(htm));
+    }
 }
 
 void fs_enable_autosave(void) {
