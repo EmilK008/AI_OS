@@ -955,9 +955,7 @@ void browser_render(void) {
                     /* Skip content - we still push/pop but don't render */
                 }
 
-                /* Apply margin-top */
-                draw_y += cur_style()->margin_top;
-                draw_x = 8 + cur_style()->padding_left;
+                /* margin-top and padding_left are applied by block-level tag handlers below */
             }
 
             /* Check display_none on the CURRENT style (after push for open, before pop for close) */
@@ -1059,6 +1057,7 @@ void browser_render(void) {
                     if (!closing) draw_x += 8; else draw_x += 16;
                 }
                 if (is_block) {
+                    if (!closing) draw_y += cur_style()->margin_top;
                     last_was_space = true;
                     line_start = true;
                 }
