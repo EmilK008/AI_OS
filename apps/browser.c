@@ -70,8 +70,8 @@ static const color_t brw_palette[PIC_PAL_COUNT] = {
     COLOR_RGB(128, 128, 128),  COLOR_RGB(200, 200, 200),
 };
 
-#define IMG_MAX_W 200
-#define IMG_MAX_H 150
+#define IMG_MAX_W 400
+#define IMG_MAX_H 300
 static uint8_t img_decode_buf[IMG_MAX_W * IMG_MAX_H];
 
 static bool pic_decode(const char *data, int size, int *out_w, int *out_h) {
@@ -83,15 +83,20 @@ static bool pic_decode(const char *data, int size, int *out_w, int *out_h) {
     if (w > IMG_MAX_W) w = IMG_MAX_W;
     if (h > IMG_MAX_H) h = IMG_MAX_H;
     mem_set(img_decode_buf, 1, (uint32_t)(w * h));
+    int real_w = (uint8_t)data[3] | ((uint8_t)data[4] << 8);
+    int real_h = (uint8_t)data[5] | ((uint8_t)data[6] << 8);
     int pos = 7;
-    for (int y = 0; y < h; y++) {
+    for (int y = 0; y < real_h; y++) {
         int x = 0;
-        while (x < w && pos + 1 < size) {
+        while (x < real_w && pos + 1 < size) {
             int run = (uint8_t)data[pos++];
             uint8_t val = (uint8_t)data[pos++];
             if (val >= PIC_PAL_COUNT) val = 0;
-            for (int i = 0; i < run && x < w; i++)
-                img_decode_buf[y * w + x++] = val;
+            for (int i = 0; i < run && x < real_w; i++) {
+                if (y < h && x < w)
+                    img_decode_buf[y * w + x] = val;
+                x++;
+            }
         }
     }
     *out_w = w;
@@ -99,16 +104,28 @@ static bool pic_decode(const char *data, int size, int *out_w, int *out_h) {
     return true;
 }
 
+/* Blit decoded PIC image with nearest-neighbor scaling.
+ * dec_w = stride of img_decode_buf (decoded width from pic_decode).
+ * src_w/src_h = visible region size within decoded image.
+ * dst_w/dst_h = display size on screen.
+ * ox/oy = source offset for cropping (used by cover fit). */
 static void brw_blit_pic(color_t *buf, int cw, int ch __attribute__((unused)),
-                          int dx, int dy, int img_w, int img_h, int scroll_y) {
-    for (int y = 0; y < img_h; y++) {
+                          int dx, int dy, int dec_w,
+                          int src_w, int src_h,
+                          int dst_w, int dst_h,
+                          int ox, int oy, int scroll_y) {
+    for (int y = 0; y < dst_h; y++) {
         int screen_y = CONTENT_Y + dy + y - scroll_y;
         if (screen_y < CONTENT_Y) continue;
         if (screen_y >= CONTENT_Y + CONTENT_H) break;
-        for (int x = 0; x < img_w; x++) {
+        int sy = oy + (y * src_h) / dst_h;
+        if (sy < 0 || sy >= oy + src_h) continue;
+        for (int x = 0; x < dst_w; x++) {
             int screen_x = dx + x;
             if (screen_x < 0 || screen_x >= cw) continue;
-            uint8_t idx = img_decode_buf[y * img_w + x];
+            int sx = ox + (x * src_w) / dst_w;
+            if (sx < 0 || sx >= ox + src_w) continue;
+            uint8_t idx = img_decode_buf[sy * dec_w + sx];
             if (idx < PIC_PAL_COUNT)
                 buf[screen_y * cw + screen_x] = brw_palette[idx];
         }
@@ -2274,11 +2291,15 @@ void browser_render(void) {
                     else { draw_y += 4; draw_x = 8; }
                     is_block = true;
                 } else if (tag_eq(tag_name, tn, "img") && !closing) {
-                    /* Self-closing <img> tag */
+                    /* Self-closing <img> tag with width/height/fit */
                     char img_src[ADDR_MAX + 1];
                     char img_alt[32];
+                    char attr_w[16], attr_h[16], attr_fit[16];
                     extract_attr(tag_full, tf, "src", img_src, ADDR_MAX);
                     extract_attr(tag_full, tf, "alt", img_alt, 32);
+                    extract_attr(tag_full, tf, "width", attr_w, 16);
+                    extract_attr(tag_full, tf, "height", attr_h, 16);
+                    extract_attr(tag_full, tf, "fit", attr_fit, 16);
                     bool img_ok = false;
                     int img_w = 0, img_h = 0;
                     if (img_src[0]) {
@@ -2291,8 +2312,52 @@ void browser_render(void) {
                         }
                     }
                     if (img_ok && img_w > 0 && img_h > 0) {
-                        brw_blit_pic(buf, cw, ch, draw_x, draw_y, img_w, img_h, T->scroll_y);
-                        draw_y += img_h + 4;
+                        /* Source (decoded) dimensions */
+                        int src_w = img_w, src_h = img_h;
+                        /* Target display dimensions */
+                        int dst_w = img_w, dst_h = img_h;
+                        int want_w = attr_w[0] ? str_to_int(attr_w) : 0;
+                        int want_h = attr_h[0] ? str_to_int(attr_h) : 0;
+                        if (want_w > 0 && want_h > 0) {
+                            dst_w = want_w; dst_h = want_h;
+                        } else if (want_w > 0) {
+                            dst_w = want_w;
+                            dst_h = (src_h * want_w) / src_w;
+                        } else if (want_h > 0) {
+                            dst_h = want_h;
+                            dst_w = (src_w * want_h) / src_h;
+                        }
+                        if (dst_w < 1) dst_w = 1;
+                        if (dst_h < 1) dst_h = 1;
+                        /* fit modes: contain, cover, stretch (default) */
+                        int blit_src_w = src_w, blit_src_h = src_h;
+                        int ox = 0, oy = 0;
+                        if (str_eq(attr_fit, "contain") && (want_w > 0 || want_h > 0)) {
+                            /* Fit inside dst box preserving aspect ratio */
+                            int fw = dst_w, fh = (src_h * dst_w) / src_w;
+                            if (fh > dst_h) { fh = dst_h; fw = (src_w * dst_h) / src_h; }
+                            dst_w = fw > 0 ? fw : 1;
+                            dst_h = fh > 0 ? fh : 1;
+                        } else if (str_eq(attr_fit, "cover") && (want_w > 0 || want_h > 0)) {
+                            /* Fill dst box, crop excess (center crop) */
+                            int scale_w = (src_w * dst_h) / src_h;
+                            int scale_h = (src_h * dst_w) / src_w;
+                            if (scale_w >= dst_w) {
+                                /* Scale to match height, crop width */
+                                blit_src_w = (src_w * dst_w) / scale_w;
+                                ox = (src_w - blit_src_w) / 2;
+                                blit_src_h = src_h;
+                            } else {
+                                /* Scale to match width, crop height */
+                                blit_src_h = (src_h * dst_h) / scale_h;
+                                oy = (src_h - blit_src_h) / 2;
+                                blit_src_w = src_w;
+                            }
+                        }
+                        /* stretch is the default — just use dst_w/dst_h directly */
+                        brw_blit_pic(buf, cw, ch, draw_x, draw_y, src_w,
+                                     blit_src_w, blit_src_h, dst_w, dst_h, ox, oy, T->scroll_y);
+                        draw_y += dst_h + 4;
                     } else {
                         /* Show [alt] fallback */
                         int sy = CONTENT_Y + draw_y - T->scroll_y;
