@@ -75,23 +75,60 @@ void fs_init_defaults(void) {
     int home = fs_create("home.htm", FS_FILE);
     if (home >= 0) {
         const char *htm =
+            "<style>"
+            "h1 { color: red; }"
+            "h2 { color: blue; }"
+            ".big { color: white; background-color: red; }"
+            ".green { color: lime; background-color: black; }"
+            ".fancy { color: orange; text-decoration: underline; }"
+            "</style>"
             "<h1>Welcome to AI_OS</h1>"
-            "<p>This is the <b>AI_OS Browser</b> - a simple HTML viewer for local files.</p>"
-            "<h2>Features</h2>"
+            "<p>This heading above is <b>red</b> from a style block rule: "
+            "h1 { color: red; }</p>"
+            "<h2>CSS Demo</h2>"
+            "<p>That heading is <b>blue</b> from: h2 { color: blue; }</p>"
+            "<hr>"
+            "<p><span class=\"big\"> White on Red </span> uses "
+            "class=\"big\" with .big { color: white; background-color: red; }</p>"
+            "<p><span class=\"green\"> Lime on Black </span> uses "
+            "class=\"green\"</p>"
+            "<p><span class=\"fancy\">Orange Underlined</span> uses "
+            "class=\"fancy\" with color + text-decoration</p>"
+            "<hr>"
+            "<p>Inline styles:</p>"
             "<ul>"
-            "<li>View local HTML files from the filesystem</li>"
-            "<li>Basic formatting: <b>bold</b>, <i>italic</i>, <u>underline</u></li>"
-            "<li>Headings, paragraphs, lists, and links</li>"
-            "<li>Navigate between pages with clickable links</li>"
+            "<li><span style=\"color: red\">RED</span> - "
+            "style=\"color: red\"</li>"
+            "<li><span style=\"color: blue\">BLUE</span> - "
+            "style=\"color: blue\"</li>"
+            "<li><span style=\"color: yellow; background-color: purple\"> YELLOW ON PURPLE </span> - "
+            "style=\"color: yellow; background-color: purple\"</li>"
+            "<li><span style=\"color: #ff6600\">ORANGE HEX</span> - "
+            "style=\"color: #ff6600\"</li>"
+            "<li><span style=\"color: rgb(255,0,255)\">MAGENTA RGB</span> - "
+            "style=\"color: rgb(255,0,255)\"</li>"
             "</ul>"
             "<hr>"
-            "<h2>Getting Started</h2>"
-            "<p>Create HTML files in <b>Notepad</b> and view them here!</p>"
-            "<p>Use the address bar to type a filename, or click links to navigate.</p>"
-            "<p>Press <b>Backspace</b> to go back. Use <b>PgUp/PgDn</b> to scroll.</p>"
-            "<hr>"
-            "<p>Try viewing: <a href=\"readme.txt\">readme.txt</a></p>";
+            "<p>Links: <a href=\"readme.txt\">readme.txt</a> | "
+            "<a href=\"demo.htm\">CSS demo page</a></p>"
+            "<p>Scroll: PgUp/PgDn | Back: Backspace</p>";
         fs_write_file(home, htm, str_len(htm));
+    }
+
+    /* Create CSS demo page */
+    int demo = fs_create("demo.htm", FS_FILE);
+    if (demo >= 0) {
+        const char *htm =
+            "<style>"
+            "h1 { color: crimson; }"
+            "p { color: navy; }"
+            ".box { background-color: gold; color: black; padding-left: 16; }"
+            "</style>"
+            "<h1>CSS Demo Page</h1>"
+            "<p>All paragraphs on this page are navy blue from: p { color: navy; }</p>"
+            "<div class=\"box\">This box has gold background and padding from .box class</div>"
+            "<p>Go <a href=\"home.htm\">back to home</a></p>";
+        fs_write_file(demo, htm, str_len(htm));
     }
 }
 

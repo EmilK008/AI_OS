@@ -62,6 +62,11 @@ void kernel_main(void) {
     fs_init();
     if (have_disk && fs_load_from_disk() == 0) {
         dbg_print("DISK: loaded\n");
+        /* Ensure default files exist even after disk load */
+        if (fs_find("home.htm") < 0 || fs_find("demo.htm") < 0) {
+            fs_init_defaults();
+            dbg_print("DISK: defaults added\n");
+        }
     } else {
         fs_init_defaults();
         if (have_disk) {

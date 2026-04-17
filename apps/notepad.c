@@ -176,9 +176,10 @@ static int  picker_scroll = 0;
 #define AC_MODE_TAG    0
 #define AC_MODE_ATTR   1
 #define AC_MODE_CLOSE  2
+#define AC_MODE_CSS    3
 #define AC_MAX_MATCHES 48
 #define AC_MAX_VISIBLE 6
-#define AC_POPUP_W     130
+#define AC_POPUP_W     160
 #define AC_ITEM_H      16
 #define AC_PREFIX_MAX  15
 
@@ -246,6 +247,50 @@ static const struct {
     { (const char *)0, "style"  },
 };
 
+/* CSS property database for autocomplete */
+#define CSS_PROP_COUNT 18
+static const char *css_props[CSS_PROP_COUNT] = {
+    "background", "background-color", "border", "border-bottom",
+    "color", "display", "font-size", "font-style",
+    "font-weight", "margin", "margin-bottom", "margin-top",
+    "padding", "padding-left", "text-align", "text-decoration",
+    "text-transform", "width"
+};
+
+/* CSS value suggestions per property */
+#define CSS_VAL_COUNT 22
+static const struct {
+    const char *prop;
+    const char *val;
+} css_vals[CSS_VAL_COUNT] = {
+    { "color",           "red"       },
+    { "color",           "blue"      },
+    { "color",           "green"     },
+    { "color",           "white"     },
+    { "color",           "black"     },
+    { "background-color","red"       },
+    { "background-color","blue"      },
+    { "background-color","yellow"    },
+    { "background-color","white"     },
+    { "background-color","black"     },
+    { "display",         "none"      },
+    { "display",         "block"     },
+    { "display",         "inline"    },
+    { "font-weight",     "bold"      },
+    { "font-weight",     "normal"    },
+    { "font-style",      "italic"    },
+    { "font-style",      "normal"    },
+    { "text-align",      "center"    },
+    { "text-align",      "left"      },
+    { "text-align",      "right"     },
+    { "text-decoration", "underline" },
+    { "text-decoration", "none"      },
+};
+
+/* Track CSS property context for value suggestions */
+static char ac_css_prop[32]; /* the property name when suggesting values */
+static int  ac_css_submode;  /* 0 = property name, 1 = value */
+
 static bool is_htm_file(void) {
     if (filename_len < 4) return false;
     /* Check .htm or .html ending */
@@ -289,10 +334,25 @@ static void ac_update_matches(void) {
         }
     } else if (ac_mode == AC_MODE_ATTR) {
         for (int i = 0; i < HTML_ATTR_COUNT && ac_match_count < AC_MAX_MATCHES; i++) {
-            /* Show attr if it's generic (tag==NULL) or matches current tag */
             if (html_attrs[i].tag == (const char *)0 || str_eq(html_attrs[i].tag, ac_tag_ctx)) {
                 if (ac_prefix_len == 0 || ac_prefix_match(html_attrs[i].attr, ac_prefix, ac_prefix_len))
                     ac_matches[ac_match_count++] = i;
+            }
+        }
+    } else if (ac_mode == AC_MODE_CSS) {
+        if (ac_css_submode == 0) {
+            /* CSS property names */
+            for (int i = 0; i < CSS_PROP_COUNT && ac_match_count < AC_MAX_MATCHES; i++) {
+                if (ac_prefix_len == 0 || ac_prefix_match(css_props[i], ac_prefix, ac_prefix_len))
+                    ac_matches[ac_match_count++] = i;
+            }
+        } else {
+            /* CSS values for current property */
+            for (int i = 0; i < CSS_VAL_COUNT && ac_match_count < AC_MAX_MATCHES; i++) {
+                if (str_eq(css_vals[i].prop, ac_css_prop)) {
+                    if (ac_prefix_len == 0 || ac_prefix_match(css_vals[i].val, ac_prefix, ac_prefix_len))
+                        ac_matches[ac_match_count++] = i;
+                }
             }
         }
     }
@@ -367,6 +427,25 @@ static void ac_accept(void) {
         insert_string(attr);
         insert_string("=\"\"");
         cursor_pos--; /* position between quotes */
+    } else if (ac_mode == AC_MODE_CSS) {
+        if (ac_css_submode == 0) {
+            /* CSS property: insert "property: " and switch to value mode */
+            const char *prop = css_props[ac_matches[ac_sel]];
+            insert_string(prop);
+            insert_string(": ");
+            /* Remember property and start value autocomplete */
+            str_ncopy(ac_css_prop, prop, 31);
+            ac_prefix_len = 0;
+            ac_prefix[0] = '\0';
+            ac_css_submode = 1;
+            ac_update_matches();
+            if (ac_match_count > 0) return; /* keep ac_active = true */
+        } else {
+            /* CSS value: insert "value;" */
+            const char *val = css_vals[ac_matches[ac_sel]].val;
+            insert_string(val);
+            insert_string("; ");
+        }
     }
 
     ac_active = false;
@@ -377,9 +456,7 @@ static void ac_accept(void) {
 static void ac_find_tag_context(char *out, int max) {
     out[0] = '\0';
     int i = cursor_pos - 1;
-    /* Skip back past the space we just typed */
     while (i >= 0 && text_buf[i] == ' ') i--;
-    /* Now collect tag name chars backwards */
     int end = i + 1;
     while (i >= 0 && text_buf[i] != '<' && text_buf[i] != '>' && text_buf[i] != ' ') i--;
     if (i >= 0 && text_buf[i] == '<') {
@@ -393,6 +470,89 @@ static void ac_find_tag_context(char *out, int max) {
         }
         out[len] = '\0';
     }
+}
+
+/* Detect if cursor is in a CSS context:
+   - Inside style="..." attribute value
+   - Inside <style>...</style> block
+   Returns true if CSS autocomplete should trigger */
+static bool ac_in_css_context(void) {
+    int i = cursor_pos - 1;
+
+    /* Check for style="..." context: scan back for style=" without hitting > or < */
+    int quote_count = 0;
+    int j = i;
+    while (j >= 0 && j > cursor_pos - 200) {
+        if (text_buf[j] == '"') quote_count++;
+        if (text_buf[j] == '<' || text_buf[j] == '>') break;
+        j--;
+    }
+    /* If we hit '<' and found style=" pattern before our position */
+    if (j >= 0 && text_buf[j] == '<') {
+        /* Scan from '<' forward looking for style=" */
+        int k = j + 1;
+        while (k < cursor_pos - 6) {
+            if ((text_buf[k] == 's' || text_buf[k] == 'S') &&
+                (text_buf[k+1] == 't' || text_buf[k+1] == 'T') &&
+                (text_buf[k+2] == 'y' || text_buf[k+2] == 'Y') &&
+                (text_buf[k+3] == 'l' || text_buf[k+3] == 'L') &&
+                (text_buf[k+4] == 'e' || text_buf[k+4] == 'E') &&
+                text_buf[k+5] == '=' && text_buf[k+6] == '"') {
+                /* Check we're inside the quotes (odd number of quotes between style=" and cursor) */
+                int q = 0;
+                for (int m = k + 6; m < cursor_pos; m++)
+                    if (text_buf[m] == '"') q++;
+                if (q % 2 == 0) return true; /* inside the first pair of quotes */
+            }
+            k++;
+        }
+    }
+
+    /* Check for <style>...</style> context */
+    /* Scan backwards for <style> without hitting </style> first */
+    j = i;
+    while (j >= 6) {
+        if (text_buf[j] == '>' &&
+            text_buf[j-1] == 'e' && text_buf[j-2] == 'l' &&
+            text_buf[j-3] == 'y' && text_buf[j-4] == 't' &&
+            text_buf[j-5] == 's') {
+            /* Found "style>" - is it <style> or </style>? */
+            if (j >= 7 && text_buf[j-6] == '/' && text_buf[j-7] == '<') {
+                return false; /* </style> - we're outside */
+            }
+            if (j >= 6 && text_buf[j-6] == '<') {
+                return true; /* <style> - we're inside */
+            }
+        }
+        j--;
+    }
+
+    return false;
+}
+
+/* Check if cursor is right after ": " in a CSS context (for value autocomplete) */
+static bool ac_css_after_colon(char *prop_out, int max) {
+    prop_out[0] = '\0';
+    int i = cursor_pos - 1;
+    /* We just typed a space or colon. Look back for "property:" pattern */
+    while (i >= 0 && text_buf[i] == ' ') i--;
+    if (i < 0 || text_buf[i] != ':') return false;
+    i--; /* skip ':' */
+    while (i >= 0 && text_buf[i] == ' ') i--;
+    /* Collect property name backwards */
+    int end = i + 1;
+    while (i >= 0 && text_buf[i] != ';' && text_buf[i] != '{' && text_buf[i] != '"' &&
+           text_buf[i] != '\n' && text_buf[i] != ' ') i--;
+    int start = i + 1;
+    int len = end - start;
+    if (len <= 0 || len > max - 1) return false;
+    for (int k = 0; k < len; k++) {
+        char c = text_buf[start + k];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        prop_out[k] = c;
+    }
+    prop_out[len] = '\0';
+    return true;
 }
 
 static void picker_refresh(void) {
@@ -963,16 +1123,66 @@ static void np_on_event(struct window *win, struct gui_event *evt) {
                     /* Typed </ — closing tag mode */
                     ac_start(AC_MODE_CLOSE);
                 } else if ((char)k == ' ') {
-                    /* Space inside a tag? Check if we're between < and unclosed > */
-                    char ctx[16];
-                    ac_find_tag_context(ctx, 16);
-                    if (ctx[0]) {
-                        ac_mode = AC_MODE_ATTR;
+                    /* Check CSS value context first (after "property: ") */
+                    if (ac_in_css_context()) {
+                        char prop[32];
+                        if (ac_css_after_colon(prop, 32)) {
+                            ac_mode = AC_MODE_CSS;
+                            ac_active = true;
+                            ac_prefix_len = 0;
+                            ac_prefix[0] = '\0';
+                            ac_css_submode = 1;
+                            str_ncopy(ac_css_prop, prop, 31);
+                            ac_update_matches();
+                        }
+                    } else {
+                        /* Space inside a tag? */
+                        char ctx[16];
+                        ac_find_tag_context(ctx, 16);
+                        if (ctx[0]) {
+                            ac_mode = AC_MODE_ATTR;
+                            ac_active = true;
+                            ac_prefix_len = 0;
+                            ac_prefix[0] = '\0';
+                            str_ncopy(ac_tag_ctx, ctx, 15);
+                            ac_update_matches();
+                        }
+                    }
+                } else if ((char)k == ';' || (char)k == '\n') {
+                    /* After semicolon or newline in CSS: suggest next property */
+                    if (ac_in_css_context()) {
+                        ac_mode = AC_MODE_CSS;
                         ac_active = true;
                         ac_prefix_len = 0;
                         ac_prefix[0] = '\0';
-                        str_ncopy(ac_tag_ctx, ctx, 15);
+                        ac_css_submode = 0;
+                        ac_css_prop[0] = '\0';
                         ac_update_matches();
+                    }
+                } else if ((char)k == '{') {
+                    /* Opening brace in <style> block: suggest first property */
+                    if (ac_in_css_context()) {
+                        ac_mode = AC_MODE_CSS;
+                        ac_active = true;
+                        ac_prefix_len = 0;
+                        ac_prefix[0] = '\0';
+                        ac_css_submode = 0;
+                        ac_css_prop[0] = '\0';
+                        ac_update_matches();
+                    }
+                } else if ((char)k == ':') {
+                    /* Colon after property: suggest values */
+                    if (ac_in_css_context()) {
+                        char prop[32];
+                        if (ac_css_after_colon(prop, 32)) {
+                            ac_mode = AC_MODE_CSS;
+                            ac_active = true;
+                            ac_prefix_len = 0;
+                            ac_prefix[0] = '\0';
+                            ac_css_submode = 1;
+                            str_ncopy(ac_css_prop, prop, 31);
+                            ac_update_matches();
+                        }
                     }
                 }
             }
@@ -1346,6 +1556,10 @@ void notepad_render(void) {
                 const char *label;
                 if (ac_mode == AC_MODE_ATTR)
                     label = html_attrs[ac_matches[idx]].attr;
+                else if (ac_mode == AC_MODE_CSS && ac_css_submode == 0)
+                    label = css_props[ac_matches[idx]];
+                else if (ac_mode == AC_MODE_CSS && ac_css_submode == 1)
+                    label = css_vals[ac_matches[idx]].val;
                 else
                     label = html_tags[ac_matches[idx]];
 
@@ -1360,6 +1574,16 @@ void notepad_render(void) {
                     np_text(buf, cw, ch, popup_x + 14, iy, label, COLOR_WHITE, row_bg);
                     np_text(buf, cw, ch, popup_x + 14 + str_len(label) * 8, iy, ">",
                             COLOR_RGB(100, 160, 220), row_bg);
+                } else if (ac_mode == AC_MODE_CSS) {
+                    if (ac_css_submode == 0) {
+                        /* Property name */
+                        np_text(buf, cw, ch, popup_x + 6, iy, label, COLOR_RGB(180, 255, 180), row_bg);
+                        np_text(buf, cw, ch, popup_x + 6 + str_len(label) * 8 + 4, iy, ":",
+                                COLOR_RGB(100, 100, 120), row_bg);
+                    } else {
+                        /* Value */
+                        np_text(buf, cw, ch, popup_x + 6, iy, label, COLOR_RGB(255, 200, 140), row_bg);
+                    }
                 } else {
                     np_text(buf, cw, ch, popup_x + 6, iy, label, COLOR_RGB(180, 220, 255), row_bg);
                     np_text(buf, cw, ch, popup_x + 6 + str_len(label) * 8 + 4, iy, "=\"\"",

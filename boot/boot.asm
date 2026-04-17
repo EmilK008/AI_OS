@@ -8,7 +8,7 @@
 [ORG 0x7C00]
 
 KERNEL_OFFSET     equ 0x10000
-KERNEL_SECTORS    equ 255
+KERNEL_SECTORS    equ 512
 
 start:
     cli
@@ -48,10 +48,12 @@ start:
     ; Sectors remaining in this track
     mov  al, 19
     sub  al, cl
-    cmp  al, [sectors_left]
+    movzx bx, al             ; BX = track-limited count (word)
+    cmp  bx, [sectors_left]
     jbe  .count_ok
-    mov  al, [sectors_left]
+    mov  bx, [sectors_left]
 .count_ok:
+    mov  al, bl               ; AL = min(track_remaining, sectors_left)
     ; Limit read to avoid crossing a 64KB DMA boundary
     ; Physical address = load_seg * 16
     ; Remaining bytes in current 64KB page = 0x10000 - (phys & 0xFFFF)

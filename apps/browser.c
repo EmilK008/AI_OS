@@ -1,6 +1,6 @@
 /* ===========================================================================
- * Browser - Simple HTML file viewer for local filesystem
- * Renders basic HTML tags: h1-h3, p, b, i, u, br, hr, a, ul/li
+ * Browser - HTML file viewer with CSS support
+ * Renders HTML tags with inline style="", <style> blocks, and .class selectors
  * =========================================================================== */
 #include "browser.h"
 #include "window.h"
@@ -23,7 +23,7 @@
 #define ADDR_W      (BRW_W - ADDR_X - 40)
 #define ADDR_MAX    30
 
-/* Colors */
+/* Default colors */
 #define C_BG        COLOR_RGB(245, 245, 240)
 #define C_TOOLBAR   COLOR_RGB(220, 222, 228)
 #define C_ADDR_BG   COLOR_WHITE
@@ -37,11 +37,11 @@
 #define C_BOLD       COLOR_RGB(0, 0, 0)
 #define C_ITALIC     COLOR_RGB(100, 60, 120)
 #define C_LINK       COLOR_RGB(0, 80, 200)
-#define C_LINK_HOVER COLOR_RGB(0, 120, 255)
 #define C_HR         COLOR_RGB(180, 180, 180)
 #define C_BULLET     COLOR_RGB(80, 80, 80)
 #define C_BTN_BG    COLOR_RGB(200, 200, 208)
 #define C_BTN_FG    COLOR_RGB(40, 40, 40)
+#define C_NONE      0xFF000000  /* sentinel: no color set */
 
 /* Page content buffer */
 #define PAGE_BUF_SIZE  8192
@@ -60,7 +60,7 @@ static int  history_count = 0;
 
 /* Scroll */
 static int scroll_y = 0;
-static int content_total_h = 0;  /* total rendered height */
+static int content_total_h = 0;
 
 /* Clickable link regions */
 #define MAX_LINKS 32
@@ -74,9 +74,475 @@ static int hovered_link = -1;
 
 /* Window */
 static int win_id = -1;
-
-/* Status message */
 static char status_msg[64];
+
+/* ===========================================================================
+ * CSS Engine
+ * =========================================================================== */
+
+/* --- Color parsing --- */
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static char to_lower(char c) {
+    if (c >= 'A' && c <= 'Z') return c + 32;
+    return c;
+}
+
+static bool ci_eq(const char *a, const char *b) {
+    while (*a && *b) {
+        if (to_lower(*a) != to_lower(*b)) return false;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+/* Skip whitespace, return new position */
+static int skip_ws(const char *s, int pos, int len) {
+    while (pos < len && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n' || s[pos] == '\r'))
+        pos++;
+    return pos;
+}
+
+/* Parse an integer from string, return chars consumed */
+static int parse_int(const char *s, int pos, int len, int *out) {
+    int val = 0;
+    int start = pos;
+    while (pos < len && s[pos] >= '0' && s[pos] <= '9') {
+        val = val * 10 + (s[pos] - '0');
+        pos++;
+    }
+    *out = val;
+    return pos - start;
+}
+
+static color_t parse_color(const char *val) {
+    /* Skip leading whitespace */
+    while (*val == ' ') val++;
+
+    /* Named colors */
+    if (ci_eq(val, "red"))     return COLOR_RGB(255, 0, 0);
+    if (ci_eq(val, "green"))   return COLOR_RGB(0, 128, 0);
+    if (ci_eq(val, "blue"))    return COLOR_RGB(0, 0, 255);
+    if (ci_eq(val, "white"))   return COLOR_RGB(255, 255, 255);
+    if (ci_eq(val, "black"))   return COLOR_RGB(0, 0, 0);
+    if (ci_eq(val, "yellow"))  return COLOR_RGB(255, 255, 0);
+    if (ci_eq(val, "cyan"))    return COLOR_RGB(0, 255, 255);
+    if (ci_eq(val, "orange"))  return COLOR_RGB(255, 165, 0);
+    if (ci_eq(val, "purple"))  return COLOR_RGB(128, 0, 128);
+    if (ci_eq(val, "grey") || ci_eq(val, "gray")) return COLOR_RGB(128, 128, 128);
+    if (ci_eq(val, "pink"))    return COLOR_RGB(255, 192, 203);
+    if (ci_eq(val, "brown"))   return COLOR_RGB(139, 69, 19);
+    if (ci_eq(val, "navy"))    return COLOR_RGB(0, 0, 128);
+    if (ci_eq(val, "teal"))    return COLOR_RGB(0, 128, 128);
+    if (ci_eq(val, "lime"))    return COLOR_RGB(0, 255, 0);
+    if (ci_eq(val, "maroon"))  return COLOR_RGB(128, 0, 0);
+    if (ci_eq(val, "olive"))   return COLOR_RGB(128, 128, 0);
+    if (ci_eq(val, "aqua"))    return COLOR_RGB(0, 255, 255);
+    if (ci_eq(val, "silver"))  return COLOR_RGB(192, 192, 192);
+    if (ci_eq(val, "fuchsia")) return COLOR_RGB(255, 0, 255);
+    if (ci_eq(val, "coral"))   return COLOR_RGB(255, 127, 80);
+    if (ci_eq(val, "gold"))    return COLOR_RGB(255, 215, 0);
+    if (ci_eq(val, "tomato"))  return COLOR_RGB(255, 99, 71);
+    if (ci_eq(val, "salmon"))  return COLOR_RGB(250, 128, 114);
+    if (ci_eq(val, "khaki"))   return COLOR_RGB(240, 230, 140);
+    if (ci_eq(val, "plum"))    return COLOR_RGB(221, 160, 221);
+    if (ci_eq(val, "tan"))     return COLOR_RGB(210, 180, 140);
+    if (ci_eq(val, "crimson")) return COLOR_RGB(220, 20, 60);
+    if (ci_eq(val, "indigo"))  return COLOR_RGB(75, 0, 130);
+    if (ci_eq(val, "violet"))  return COLOR_RGB(238, 130, 238);
+    if (ci_eq(val, "darkgray") || ci_eq(val, "darkgrey")) return COLOR_RGB(169, 169, 169);
+    if (ci_eq(val, "lightgray") || ci_eq(val, "lightgrey")) return COLOR_RGB(211, 211, 211);
+    if (ci_eq(val, "darkblue"))  return COLOR_RGB(0, 0, 139);
+    if (ci_eq(val, "darkred"))   return COLOR_RGB(139, 0, 0);
+    if (ci_eq(val, "darkgreen")) return COLOR_RGB(0, 100, 0);
+    if (ci_eq(val, "skyblue"))   return COLOR_RGB(135, 206, 235);
+    if (ci_eq(val, "steelblue")) return COLOR_RGB(70, 130, 180);
+    if (ci_eq(val, "wheat"))     return COLOR_RGB(245, 222, 179);
+    if (ci_eq(val, "linen"))     return COLOR_RGB(250, 240, 230);
+    if (ci_eq(val, "ivory"))     return COLOR_RGB(255, 255, 240);
+    if (ci_eq(val, "snow"))      return COLOR_RGB(255, 250, 250);
+
+    /* Hex: #RGB or #RRGGBB */
+    if (val[0] == '#') {
+        val++;
+        int len = str_len(val);
+        if (len >= 6) {
+            int r = hex_digit(val[0]) * 16 + hex_digit(val[1]);
+            int g = hex_digit(val[2]) * 16 + hex_digit(val[3]);
+            int b = hex_digit(val[4]) * 16 + hex_digit(val[5]);
+            if (r >= 0 && g >= 0 && b >= 0) return COLOR_RGB(r, g, b);
+        } else if (len >= 3) {
+            int r = hex_digit(val[0]); r = r * 16 + r;
+            int g = hex_digit(val[1]); g = g * 16 + g;
+            int b = hex_digit(val[2]); b = b * 16 + b;
+            if (r >= 0 && g >= 0 && b >= 0) return COLOR_RGB(r, g, b);
+        }
+    }
+
+    /* rgb(r, g, b) */
+    if (val[0] == 'r' && val[1] == 'g' && val[2] == 'b' && val[3] == '(') {
+        int p = 4;
+        int vlen = str_len(val);
+        p = skip_ws(val, p, vlen);
+        int r = 0, g = 0, b = 0;
+        parse_int(val, p, vlen, &r); while (p < vlen && val[p] != ',') p++; p++;
+        p = skip_ws(val, p, vlen);
+        parse_int(val, p, vlen, &g); while (p < vlen && val[p] != ',') p++; p++;
+        p = skip_ws(val, p, vlen);
+        parse_int(val, p, vlen, &b);
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+        return COLOR_RGB(r, g, b);
+    }
+
+    return C_NONE;  /* parse failed */
+}
+
+/* --- CSS Rule Storage --- */
+
+#define MAX_CSS_RULES 32
+struct css_rule {
+    char selector[32];
+    color_t color;
+    color_t bg_color;
+    bool has_color, has_bg;
+    bool bold, italic, underline;
+    bool has_bold, has_italic, has_underline;
+    int margin_top, margin_bottom, padding_left;
+    bool has_margin_top, has_margin_bottom, has_padding_left;
+    bool text_center;
+    bool has_text_align;
+    bool display_none;
+    bool has_display;
+    bool has_border_bottom;
+    color_t border_bottom_color;
+};
+static struct css_rule css_rules[MAX_CSS_RULES];
+static int css_rule_count = 0;
+
+/* --- Render Style Stack --- */
+
+#define STYLE_STACK_MAX 16
+struct render_style {
+    color_t color;
+    color_t bg_color;  /* C_NONE = transparent/inherit */
+    bool bold;
+    bool italic;
+    bool underline;
+    int padding_left;
+    bool text_center;
+    bool display_none;
+    bool has_border_bottom;
+    color_t border_bottom_color;
+    int margin_top;
+    int margin_bottom;
+};
+static struct render_style style_stack[STYLE_STACK_MAX];
+static int style_depth = 0;
+
+static void style_push(void) {
+    if (style_depth < STYLE_STACK_MAX - 1) {
+        style_stack[style_depth + 1] = style_stack[style_depth];
+        style_stack[style_depth + 1].bg_color = C_NONE;
+        style_stack[style_depth + 1].has_border_bottom = false;
+        style_stack[style_depth + 1].margin_top = 0;
+        style_stack[style_depth + 1].margin_bottom = 0;
+        style_depth++;
+    }
+}
+
+static void style_pop(void) {
+    if (style_depth > 0) style_depth--;
+}
+
+static struct render_style *cur_style(void) {
+    return &style_stack[style_depth];
+}
+
+/* --- Parse CSS properties from a declaration block --- */
+
+static void apply_css_props(const char *css, int css_len, struct render_style *st) {
+    int p = 0;
+    while (p < css_len) {
+        p = skip_ws(css, p, css_len);
+        if (p >= css_len) break;
+
+        /* Read property name */
+        char prop[32];
+        int pi = 0;
+        while (p < css_len && css[p] != ':' && css[p] != ';' && pi < 31) {
+            prop[pi++] = to_lower(css[p++]);
+        }
+        prop[pi] = '\0';
+        /* Trim trailing spaces from property */
+        while (pi > 0 && prop[pi - 1] == ' ') prop[--pi] = '\0';
+
+        if (p >= css_len || css[p] != ':') { /* skip to next ; */
+            while (p < css_len && css[p] != ';') p++;
+            if (p < css_len) p++;
+            continue;
+        }
+        p++; /* skip ':' */
+        p = skip_ws(css, p, css_len);
+
+        /* Read value */
+        char val[64];
+        int vi = 0;
+        while (p < css_len && css[p] != ';' && css[p] != '}' && vi < 63) {
+            val[vi++] = css[p++];
+        }
+        val[vi] = '\0';
+        /* Trim trailing spaces */
+        while (vi > 0 && val[vi - 1] == ' ') val[--vi] = '\0';
+        if (p < css_len && css[p] == ';') p++;
+
+        /* Apply property */
+        if (ci_eq(prop, "color")) {
+            color_t c = parse_color(val);
+            if (c != C_NONE) st->color = c;
+        } else if (ci_eq(prop, "background-color") || ci_eq(prop, "background")) {
+            color_t c = parse_color(val);
+            if (c != C_NONE) st->bg_color = c;
+        } else if (ci_eq(prop, "text-decoration")) {
+            st->underline = ci_eq(val, "underline");
+        } else if (ci_eq(prop, "text-align")) {
+            st->text_center = ci_eq(val, "center");
+        } else if (ci_eq(prop, "font-weight")) {
+            st->bold = ci_eq(val, "bold") || ci_eq(val, "700") || ci_eq(val, "800") || ci_eq(val, "900");
+        } else if (ci_eq(prop, "font-style")) {
+            st->italic = ci_eq(val, "italic") || ci_eq(val, "oblique");
+        } else if (ci_eq(prop, "margin-top")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->margin_top = v;
+        } else if (ci_eq(prop, "margin-bottom")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->margin_bottom = v;
+        } else if (ci_eq(prop, "padding-left")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->padding_left = v;
+        } else if (ci_eq(prop, "display")) {
+            st->display_none = ci_eq(val, "none");
+        } else if (ci_eq(prop, "border-bottom")) {
+            /* Simple: just treat any border-bottom as a colored line */
+            st->has_border_bottom = true;
+            /* Try to find a color in the value */
+            /* value like "1px solid red" or "2px solid #333" */
+            /* Scan for a color token */
+            char *tok = val;
+            color_t bc = C_NONE;
+            /* Try parsing from each space-separated token */
+            for (int i = 0; i < vi; i++) {
+                if (i == 0 || val[i - 1] == ' ') {
+                    bc = parse_color(val + i);
+                    if (bc != C_NONE) break;
+                }
+            }
+            st->border_bottom_color = (bc != C_NONE) ? bc : C_HR;
+            (void)tok;
+        }
+    }
+}
+
+/* Apply a CSS rule to a render_style */
+static void apply_rule(struct css_rule *r, struct render_style *st) {
+    if (r->has_color) st->color = r->color;
+    if (r->has_bg) st->bg_color = r->bg_color;
+    if (r->has_bold) st->bold = r->bold;
+    if (r->has_italic) st->italic = r->italic;
+    if (r->has_underline) st->underline = r->underline;
+    if (r->has_margin_top) st->margin_top = r->margin_top;
+    if (r->has_margin_bottom) st->margin_bottom = r->margin_bottom;
+    if (r->has_padding_left) st->padding_left = r->padding_left;
+    if (r->has_text_align) st->text_center = r->text_center;
+    if (r->has_display) st->display_none = r->display_none;
+    if (r->has_border_bottom) {
+        st->has_border_bottom = true;
+        st->border_bottom_color = r->border_bottom_color;
+    }
+}
+
+/* --- Parse <style> block into css_rules --- */
+
+static void parse_css_rule_body(const char *body, int blen, struct css_rule *rule) {
+    /* Parse CSS properties and fill the rule struct */
+    struct render_style tmp;
+    mem_set(&tmp, 0, sizeof(tmp));
+    tmp.color = C_NONE;
+    tmp.bg_color = C_NONE;
+    tmp.border_bottom_color = C_HR;
+
+    apply_css_props(body, blen, &tmp);
+
+    if (tmp.color != C_NONE) { rule->color = tmp.color; rule->has_color = true; }
+    if (tmp.bg_color != C_NONE) { rule->bg_color = tmp.bg_color; rule->has_bg = true; }
+    if (tmp.bold) { rule->bold = true; rule->has_bold = true; }
+    if (tmp.italic) { rule->italic = true; rule->has_italic = true; }
+    if (tmp.underline) { rule->underline = true; rule->has_underline = true; }
+    if (tmp.margin_top) { rule->margin_top = tmp.margin_top; rule->has_margin_top = true; }
+    if (tmp.margin_bottom) { rule->margin_bottom = tmp.margin_bottom; rule->has_margin_bottom = true; }
+    if (tmp.padding_left) { rule->padding_left = tmp.padding_left; rule->has_padding_left = true; }
+    if (tmp.text_center) { rule->text_center = true; rule->has_text_align = true; }
+    if (tmp.display_none) { rule->display_none = true; rule->has_display = true; }
+    if (tmp.has_border_bottom) { rule->has_border_bottom = true; rule->border_bottom_color = tmp.border_bottom_color; }
+}
+
+static void parse_style_block(const char *css, int css_len) {
+    int p = 0;
+    while (p < css_len && css_rule_count < MAX_CSS_RULES) {
+        p = skip_ws(css, p, css_len);
+        if (p >= css_len) break;
+
+        /* Skip CSS comments */
+        if (p + 1 < css_len && css[p] == '/' && css[p + 1] == '*') {
+            p += 2;
+            while (p + 1 < css_len && !(css[p] == '*' && css[p + 1] == '/')) p++;
+            p += 2;
+            continue;
+        }
+
+        /* Read selector */
+        char sel[32];
+        int si = 0;
+        while (p < css_len && css[p] != '{' && si < 31) {
+            sel[si++] = css[p++];
+        }
+        sel[si] = '\0';
+        /* Trim trailing spaces */
+        while (si > 0 && sel[si - 1] == ' ') sel[--si] = '\0';
+
+        if (p >= css_len || css[p] != '{') break;
+        p++; /* skip '{' */
+
+        /* Read body until '}' */
+        int body_start = p;
+        while (p < css_len && css[p] != '}') p++;
+        int body_len = p - body_start;
+        if (p < css_len) p++; /* skip '}' */
+
+        if (si == 0) continue;
+
+        /* Handle comma-separated selectors: "h1, h2, h3 { ... }" */
+        int sel_start = 0;
+        for (int i = 0; i <= si; i++) {
+            if (i == si || sel[i] == ',') {
+                /* Extract one selector */
+                char one_sel[32];
+                int os = 0;
+                int j = sel_start;
+                while (j < i && sel[j] == ' ') j++;
+                while (j < i && os < 31) {
+                    one_sel[os++] = to_lower(sel[j++]);
+                }
+                while (os > 0 && one_sel[os - 1] == ' ') os--;
+                one_sel[os] = '\0';
+                sel_start = i + 1;
+
+                if (os > 0 && css_rule_count < MAX_CSS_RULES) {
+                    struct css_rule *r = &css_rules[css_rule_count];
+                    mem_set(r, 0, sizeof(*r));
+                    str_ncopy(r->selector, one_sel, 31);
+                    parse_css_rule_body(css + body_start, body_len, r);
+                    css_rule_count++;
+                }
+            }
+        }
+    }
+}
+
+/* Scan page_buf for <style>...</style> and parse them */
+static void extract_and_parse_styles(void) {
+    css_rule_count = 0;
+    int p = 0;
+    while (p < page_len - 7) {
+        /* Find <style */
+        if (page_buf[p] == '<' &&
+            to_lower(page_buf[p+1]) == 's' && to_lower(page_buf[p+2]) == 't' &&
+            to_lower(page_buf[p+3]) == 'y' && to_lower(page_buf[p+4]) == 'l' &&
+            to_lower(page_buf[p+5]) == 'e') {
+            /* Skip to > */
+            p += 6;
+            while (p < page_len && page_buf[p] != '>') p++;
+            if (p < page_len) p++;
+            int start = p;
+            /* Find </style> */
+            while (p < page_len - 8) {
+                if (page_buf[p] == '<' && page_buf[p+1] == '/' &&
+                    to_lower(page_buf[p+2]) == 's' && to_lower(page_buf[p+3]) == 't' &&
+                    to_lower(page_buf[p+4]) == 'y' && to_lower(page_buf[p+5]) == 'l' &&
+                    to_lower(page_buf[p+6]) == 'e') {
+                    parse_style_block(page_buf + start, p - start);
+                    break;
+                }
+                p++;
+            }
+        }
+        p++;
+    }
+}
+
+/* Look up CSS rules matching a tag and class, apply to current style */
+static void apply_css_for_tag(const char *tag_name, const char *class_name) {
+    struct render_style *st = cur_style();
+    char lower_tag[16];
+    int ti = 0;
+    while (tag_name[ti] && ti < 15) { lower_tag[ti] = to_lower(tag_name[ti]); ti++; }
+    lower_tag[ti] = '\0';
+
+    for (int i = 0; i < css_rule_count; i++) {
+        struct css_rule *r = &css_rules[i];
+        bool match = false;
+
+        if (r->selector[0] == '.') {
+            /* Class selector */
+            if (class_name[0] && ci_eq(r->selector + 1, class_name))
+                match = true;
+        } else if (ci_eq(r->selector, "*")) {
+            match = true;
+        } else {
+            /* Tag selector */
+            if (ci_eq(r->selector, lower_tag))
+                match = true;
+        }
+
+        if (match) apply_rule(r, st);
+    }
+}
+
+/* --- Extract attribute values from tag_full --- */
+
+static void extract_attr(const char *tag, int tlen, const char *attr_name, char *out, int max) {
+    out[0] = '\0';
+    int alen = str_len(attr_name);
+    for (int i = 0; i < tlen - alen; i++) {
+        bool match = true;
+        for (int j = 0; j < alen; j++) {
+            if (to_lower(tag[i + j]) != to_lower(attr_name[j])) { match = false; break; }
+        }
+        if (!match) continue;
+        int j = i + alen;
+        while (j < tlen && tag[j] == ' ') j++;
+        if (j >= tlen || tag[j] != '=') continue;
+        j++;
+        while (j < tlen && tag[j] == ' ') j++;
+        char quote = 0;
+        if (j < tlen && (tag[j] == '"' || tag[j] == '\'')) { quote = tag[j]; j++; }
+        int k = 0;
+        while (j < tlen && k < max - 1) {
+            if (quote && tag[j] == quote) break;
+            if (!quote && (tag[j] == ' ' || tag[j] == '>')) break;
+            out[k++] = tag[j++];
+        }
+        out[k] = '\0';
+        return;
+    }
+}
 
 /* ---- Drawing helpers ---- */
 
@@ -121,9 +587,8 @@ static void brw_char_transparent(color_t *buf, int cw, int ch, int px, int py,
     }
 }
 
-/* Draw underline under a character position */
 static void brw_underline(color_t *buf, int cw, int ch, int px, int py, int char_w, color_t c) {
-    int uy = py + 15;  /* bottom of 16px glyph */
+    int uy = py + 15;
     if (uy >= 0 && uy < ch) {
         for (int x = px; x < px + char_w && x < cw; x++) {
             if (x >= 0) buf[uy * cw + x] = c;
@@ -131,74 +596,31 @@ static void brw_underline(color_t *buf, int cw, int ch, int px, int py, int char
     }
 }
 
-/* ---- HTML tag parsing helpers ---- */
-
-/* Case-insensitive compare for tag names */
+/* Case-insensitive tag name compare */
 static bool tag_eq(const char *tag, int tlen, const char *name) {
     int nlen = str_len(name);
     if (tlen != nlen) return false;
     for (int i = 0; i < tlen; i++) {
-        char a = tag[i];
-        char b = name[i];
-        if (a >= 'A' && a <= 'Z') a += 32;
-        if (b >= 'A' && b <= 'Z') b += 32;
-        if (a != b) return false;
+        if (to_lower(tag[i]) != to_lower(name[i])) return false;
     }
     return true;
-}
-
-/* Extract href="..." from an <a> tag body like: a href="file.htm" */
-static void extract_href(const char *tag_body, int body_len, char *href_out, int max) {
-    href_out[0] = '\0';
-    /* Find href=" */
-    for (int i = 0; i < body_len - 5; i++) {
-        char c0 = tag_body[i]; if (c0 >= 'A' && c0 <= 'Z') c0 += 32;
-        char c1 = tag_body[i+1]; if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-        char c2 = tag_body[i+2]; if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-        char c3 = tag_body[i+3]; if (c3 >= 'A' && c3 <= 'Z') c3 += 32;
-        if (c0 == 'h' && c1 == 'r' && c2 == 'e' && c3 == 'f') {
-            /* Skip to = */
-            int j = i + 4;
-            while (j < body_len && tag_body[j] == ' ') j++;
-            if (j < body_len && tag_body[j] == '=') {
-                j++;
-                while (j < body_len && tag_body[j] == ' ') j++;
-                char quote = 0;
-                if (j < body_len && (tag_body[j] == '"' || tag_body[j] == '\'')) {
-                    quote = tag_body[j]; j++;
-                }
-                int k = 0;
-                while (j < body_len && k < max - 1) {
-                    if (quote && tag_body[j] == quote) break;
-                    if (!quote && (tag_body[j] == ' ' || tag_body[j] == '>')) break;
-                    href_out[k++] = tag_body[j++];
-                }
-                href_out[k] = '\0';
-            }
-            return;
-        }
-    }
 }
 
 /* ---- Page loading ---- */
 
 static void load_page(const char *filename) {
-    /* Push current page to history before navigating */
     if (addr_len > 0 && history_count < HISTORY_MAX) {
         str_copy(history[history_count], addr_buf);
         history_count++;
     }
 
-    /* Update address bar */
     int i = 0;
     while (filename[i] && i < ADDR_MAX) { addr_buf[i] = filename[i]; i++; }
     addr_buf[i] = '\0';
     addr_len = i;
 
-    /* Load file */
     int idx = fs_find(filename);
     if (idx < 0) {
-        /* File not found - show error page */
         const char *err = "<h1>File Not Found</h1><p>Could not find: ";
         int elen = str_len(err);
         mem_copy(page_buf, err, (uint32_t)elen);
@@ -207,7 +629,6 @@ static void load_page(const char *filename) {
             page_buf[pos++] = filename[j];
         page_buf[pos++] = '<'; page_buf[pos++] = '/'; page_buf[pos++] = 'p'; page_buf[pos++] = '>';
         page_len = pos;
-        page_buf[page_len] = '\0';
     } else {
         struct fs_node *f = fs_get_node(idx);
         if (!f || f->type != FS_FILE || !f->data) {
@@ -220,8 +641,11 @@ static void load_page(const char *filename) {
             mem_copy(page_buf, f->data, (uint32_t)len);
             page_len = len;
         }
-        page_buf[page_len] = '\0';
     }
+    page_buf[page_len] = '\0';
+
+    /* Parse CSS from <style> blocks */
+    extract_and_parse_styles();
 
     scroll_y = 0;
     link_count = 0;
@@ -232,8 +656,6 @@ static void load_page(const char *filename) {
 static void navigate_back(void) {
     if (history_count <= 0) return;
     history_count--;
-
-    /* Load without pushing to history again */
     int i = 0;
     const char *filename = history[history_count];
     while (filename[i] && i < ADDR_MAX) { addr_buf[i] = filename[i]; i++; }
@@ -251,7 +673,7 @@ static void navigate_back(void) {
             page_buf[page_len] = '\0';
         }
     }
-
+    extract_and_parse_styles();
     scroll_y = 0;
     link_count = 0;
     hovered_link = -1;
@@ -263,20 +685,14 @@ static void navigate_back(void) {
 static void brw_on_event(struct window *win, struct gui_event *evt) {
     if (evt->type == EVT_KEY_PRESS) {
         uint8_t k = evt->key;
-
         if (addr_focused) {
-            /* Address bar input */
             if (k == '\n') {
                 if (addr_len > 0) {
                     addr_buf[addr_len] = '\0';
-                    /* Don't push to history here - load_page does it */
                     char tmp[ADDR_MAX + 1];
                     str_copy(tmp, addr_buf);
-                    /* Reset history push by clearing addr_len briefly */
-                    int saved_len = addr_len;
                     addr_len = 0;
                     load_page(tmp);
-                    (void)saved_len;
                 }
                 addr_focused = false;
                 return;
@@ -289,38 +705,22 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
             }
             return;
         }
-
-        /* Content area navigation */
         if (k == KEY_UP)   { scroll_y -= 16; if (scroll_y < 0) scroll_y = 0; return; }
         if (k == KEY_DOWN) { scroll_y += 16; return; }
         if (k == KEY_PGUP) { scroll_y -= CONTENT_H; if (scroll_y < 0) scroll_y = 0; return; }
         if (k == KEY_PGDN) { scroll_y += CONTENT_H; return; }
         if (k == KEY_HOME) { scroll_y = 0; return; }
         if (k == KEY_END)  { scroll_y = content_total_h - CONTENT_H; if (scroll_y < 0) scroll_y = 0; return; }
-
-        /* Alt+Left or Backspace = back */
         if (k == '\b') { navigate_back(); return; }
-
-        /* Tab focuses address bar */
         if (k == '\t') { addr_focused = true; return; }
-
-        /* L key (Ctrl+L) focus address bar */
         if (k == 12) { addr_focused = true; addr_len = 0; return; }
-
         return;
     }
 
     if (evt->type == EVT_MOUSE_DOWN) {
         int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
         int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
-
-        /* Back button */
-        if (mx >= 4 && mx < 34 && my >= 4 && my < 22) {
-            navigate_back();
-            return;
-        }
-
-        /* Go button */
+        if (mx >= 4 && mx < 34 && my >= 4 && my < 22) { navigate_back(); return; }
         if (mx >= BRW_W - 36 && mx < BRW_W - 4 && my >= 4 && my < 22) {
             if (addr_len > 0) {
                 addr_buf[addr_len] = '\0';
@@ -331,27 +731,16 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
             }
             return;
         }
-
-        /* Address bar click */
-        if (mx >= ADDR_X && mx < ADDR_X + ADDR_W && my >= 4 && my < 22) {
-            addr_focused = true;
-            return;
-        }
-
-        /* Content area - check link clicks */
+        if (mx >= ADDR_X && mx < ADDR_X + ADDR_W && my >= 4 && my < 22) { addr_focused = true; return; }
         if (my >= CONTENT_Y && my < CONTENT_Y + CONTENT_H) {
             int content_mx = mx;
             int content_my = my - CONTENT_Y + scroll_y;
-
             for (int i = 0; i < link_count; i++) {
                 if (content_mx >= links[i].x && content_mx < links[i].x + links[i].w &&
                     content_my >= links[i].y && content_my < links[i].y + links[i].h) {
-                    load_page(links[i].href);
-                    return;
+                    load_page(links[i].href); return;
                 }
             }
-
-            /* Click in content unfocuses address bar */
             addr_focused = false;
         }
     }
@@ -359,12 +748,10 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
     if (evt->type == EVT_MOUSE_MOVE) {
         int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
         int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
-
         hovered_link = -1;
         if (my >= CONTENT_Y && my < CONTENT_Y + CONTENT_H) {
             int content_mx = mx;
             int content_my = my - CONTENT_Y + scroll_y;
-
             for (int i = 0; i < link_count; i++) {
                 if (content_mx >= links[i].x && content_mx < links[i].x + links[i].w &&
                     content_my >= links[i].y && content_my < links[i].y + links[i].h) {
@@ -385,11 +772,8 @@ void browser_create(void) {
         struct window *w = wm_get_window(win_id);
         if (w && w->alive && w->on_event == brw_on_event) { wm_focus_window(win_id); return; }
     }
-    win_id = wm_create_window("Browser", 40, 30, BRW_W, BRW_H,
-                               brw_on_event, NULL);
+    win_id = wm_create_window("Browser", 40, 30, BRW_W, BRW_H, brw_on_event, NULL);
     str_copy(status_msg, "Ready");
-
-    /* Load home page */
     addr_len = 0;
     history_count = 0;
     load_page("home.htm");
@@ -410,245 +794,272 @@ void browser_render(void) {
     int ch = win->content_h;
     color_t *buf = win->content;
 
-    /* Clear */
     for (int i = 0; i < cw * ch; i++) buf[i] = C_BG;
 
-    /* ---- Toolbar ---- */
+    /* Toolbar */
     brw_rect(buf, cw, ch, 0, 0, cw, TOOLBAR_H, C_TOOLBAR);
-
-    /* Back button */
     brw_rect(buf, cw, ch, 4, 4, 30, 18, C_BTN_BG);
     brw_text(buf, cw, ch, 8, 5, "<-", C_BTN_FG, C_BTN_BG);
-
-    /* Address bar */
     brw_rect(buf, cw, ch, ADDR_X, 4, ADDR_W, 18, C_ADDR_BG);
-    /* Border */
     brw_rect(buf, cw, ch, ADDR_X, 4, ADDR_W, 1, COLOR_RGB(180, 180, 180));
     brw_rect(buf, cw, ch, ADDR_X, 21, ADDR_W, 1, COLOR_RGB(180, 180, 180));
     brw_rect(buf, cw, ch, ADDR_X, 4, 1, 18, COLOR_RGB(180, 180, 180));
     brw_rect(buf, cw, ch, ADDR_X + ADDR_W - 1, 4, 1, 18, COLOR_RGB(180, 180, 180));
-
-    /* Address text */
     addr_buf[addr_len] = '\0';
     if (addr_len > 0) {
-        /* Show as many chars as fit */
         int max_chars = (ADDR_W - 8) / 8;
         int start = 0;
         if (addr_len > max_chars) start = addr_len - max_chars;
         brw_text(buf, cw, ch, ADDR_X + 4, 5, addr_buf + start, C_ADDR_FG, C_ADDR_BG);
     }
-
-    /* Cursor in address bar */
     if (addr_focused && (timer_get_ticks() / 40) & 1) {
         int max_chars = (ADDR_W - 8) / 8;
         int visible_len = addr_len;
         if (visible_len > max_chars) visible_len = max_chars;
         brw_rect(buf, cw, ch, ADDR_X + 4 + visible_len * 8, 5, 2, 16, COLOR_RGB(0, 80, 200));
     }
-
-    /* Go button */
     brw_rect(buf, cw, ch, BRW_W - 36, 4, 32, 18, C_BTN_BG);
     brw_text(buf, cw, ch, BRW_W - 32, 5, "Go", C_BTN_FG, C_BTN_BG);
 
-    /* ---- Render HTML content ---- */
+    /* ---- Render HTML content with CSS ---- */
     link_count = 0;
 
-    /* Parser state */
+    /* Initialize style stack */
+    style_depth = 0;
+    mem_set(&style_stack[0], 0, sizeof(struct render_style));
+    style_stack[0].color = C_TEXT;
+    style_stack[0].bg_color = C_NONE;
+
     int draw_x = 8;
     int draw_y = 4;
     int max_x = BRW_W - 16;
-    bool in_bold = false;
-    bool in_italic = false;
-    bool in_underline = false;
+    int heading = 0;
     bool in_link = false;
-    int heading = 0;  /* 0=none, 1=h1, 2=h2, 3=h3 */
     bool in_list = false;
     bool at_li_start = false;
+    bool in_style_tag = false;  /* skip content inside <style>...</style> */
     char current_href[ADDR_MAX + 1];
-    int link_start_x = 0;
-    int link_start_y = 0;
+    int link_start_x = 0, link_start_y = 0;
     current_href[0] = '\0';
 
     int pos = 0;
     while (pos < page_len) {
         if (page_buf[pos] == '<') {
-            /* Parse tag */
             pos++;
             bool closing = false;
             if (pos < page_len && page_buf[pos] == '/') { closing = true; pos++; }
 
-            /* Read tag name + attributes */
             char tag_full[128];
             int tf = 0;
-            while (pos < page_len && page_buf[pos] != '>' && tf < 127) {
+            while (pos < page_len && page_buf[pos] != '>' && tf < 127)
                 tag_full[tf++] = page_buf[pos++];
-            }
             tag_full[tf] = '\0';
             if (pos < page_len && page_buf[pos] == '>') pos++;
 
-            /* Extract just the tag name (up to first space) */
             char tag_name[16];
             int tn = 0;
             for (int i = 0; i < tf && tag_full[i] != ' ' && tn < 15; i++)
                 tag_name[tn++] = tag_full[i];
             tag_name[tn] = '\0';
 
-            /* Process tag */
-            if (tag_eq(tag_name, tn, "h1")) {
-                if (!closing) { heading = 1; draw_y += 8; draw_x = 8; }
-                else { heading = 0; draw_y += 20; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "h2")) {
-                if (!closing) { heading = 2; draw_y += 6; draw_x = 8; }
-                else { heading = 0; draw_y += 18; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "h3") || tag_eq(tag_name, tn, "h4") ||
-                       tag_eq(tag_name, tn, "h5") || tag_eq(tag_name, tn, "h6")) {
-                if (!closing) { heading = 3; draw_y += 4; draw_x = 8; }
-                else { heading = 0; draw_y += 16; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "p") || tag_eq(tag_name, tn, "div") ||
-                       tag_eq(tag_name, tn, "article") || tag_eq(tag_name, tn, "section") ||
-                       tag_eq(tag_name, tn, "aside") || tag_eq(tag_name, tn, "footer") ||
-                       tag_eq(tag_name, tn, "header") || tag_eq(tag_name, tn, "nav")) {
-                if (!closing) { draw_y += 6; draw_x = 8; }
-                else { draw_y += 8; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "blockquote")) {
-                if (!closing) { draw_y += 4; draw_x = 32; }
-                else { draw_y += 4; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "pre") || tag_eq(tag_name, tn, "code")) {
-                /* Render in monospace (same font but different color) */
-                if (!closing) { in_bold = true; }
-                else { in_bold = false; }
-            } else if (tag_eq(tag_name, tn, "b") || tag_eq(tag_name, tn, "strong")) {
-                in_bold = !closing;
-            } else if (tag_eq(tag_name, tn, "i") || tag_eq(tag_name, tn, "em") ||
-                       tag_eq(tag_name, tn, "abbr")) {
-                in_italic = !closing;
-            } else if (tag_eq(tag_name, tn, "u")) {
-                in_underline = !closing;
-            } else if (tag_eq(tag_name, tn, "sub") || tag_eq(tag_name, tn, "sup")) {
-                in_italic = !closing;
-            } else if (tag_eq(tag_name, tn, "br")) {
-                draw_y += 16;
-                draw_x = 8;
-            } else if (tag_eq(tag_name, tn, "hr")) {
-                draw_y += 4;
-                int rule_y = CONTENT_Y + draw_y - scroll_y;
-                if (rule_y >= CONTENT_Y && rule_y < CONTENT_Y + CONTENT_H)
-                    brw_rect(buf, cw, ch, 8, rule_y, BRW_W - 16, 1, C_HR);
-                draw_y += 8;
-                draw_x = 8;
-            } else if (tag_eq(tag_name, tn, "a")) {
-                if (!closing) {
-                    in_link = true;
-                    extract_href(tag_full, tf, current_href, ADDR_MAX);
-                    link_start_x = draw_x;
-                    link_start_y = draw_y;
-                } else {
-                    if (in_link && link_count < MAX_LINKS && current_href[0]) {
-                        links[link_count].x = link_start_x;
-                        links[link_count].y = link_start_y;
-                        links[link_count].w = draw_x - link_start_x;
-                        links[link_count].h = 16;
-                        str_ncopy(links[link_count].href, current_href, ADDR_MAX);
-                        link_count++;
-                    }
-                    in_link = false;
-                    current_href[0] = '\0';
-                }
-            } else if (tag_eq(tag_name, tn, "ul") || tag_eq(tag_name, tn, "ol") ||
-                       tag_eq(tag_name, tn, "dl")) {
-                if (!closing) { in_list = true; draw_y += 4; }
-                else { in_list = false; draw_y += 4; }
-            } else if (tag_eq(tag_name, tn, "li") || tag_eq(tag_name, tn, "dd")) {
-                if (!closing) {
-                    draw_y += 2;
-                    draw_x = in_list ? 24 : 8;
-                    at_li_start = true;
-                } else {
-                    draw_y += 16;
-                    draw_x = 8;
-                }
-            } else if (tag_eq(tag_name, tn, "dt")) {
-                if (!closing) { draw_y += 2; draw_x = in_list ? 16 : 8; in_bold = true; }
-                else { in_bold = false; draw_y += 16; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "table") || tag_eq(tag_name, tn, "thead") ||
-                       tag_eq(tag_name, tn, "tbody")) {
-                if (!closing) { draw_y += 4; draw_x = 8; }
-                else { draw_y += 4; }
-            } else if (tag_eq(tag_name, tn, "tr")) {
-                if (!closing) { draw_x = 8; }
-                else { draw_y += 16; draw_x = 8; }
-            } else if (tag_eq(tag_name, tn, "td") || tag_eq(tag_name, tn, "th")) {
-                if (!closing) { draw_x += 8; }
-                else { draw_x += 16; }
-            } else if (tag_eq(tag_name, tn, "title") || tag_eq(tag_name, tn, "head") ||
-                       tag_eq(tag_name, tn, "html") || tag_eq(tag_name, tn, "body") ||
-                       tag_eq(tag_name, tn, "style") || tag_eq(tag_name, tn, "meta") ||
-                       tag_eq(tag_name, tn, "link") || tag_eq(tag_name, tn, "img") ||
-                       tag_eq(tag_name, tn, "input") || tag_eq(tag_name, tn, "form") ||
-                       tag_eq(tag_name, tn, "button") || tag_eq(tag_name, tn, "label") ||
-                       tag_eq(tag_name, tn, "textarea") || tag_eq(tag_name, tn, "col") ||
-                       tag_eq(tag_name, tn, "caption") || tag_eq(tag_name, tn, "span")) {
-                /* Known tags - silently skip (no layout effect or handled inline) */
+            /* Handle <style> tag: skip its content (already parsed) */
+            if (tag_eq(tag_name, tn, "style")) {
+                in_style_tag = !closing;
+                continue;
             }
-            /* Skip unknown tags */
+            if (in_style_tag) continue;
+
+            /* Check for display:none in matching CSS or inline style */
+            if (!closing) {
+                style_push();
+
+                /* Apply CSS rules for this tag */
+                char class_val[32];
+                extract_attr(tag_full, tf, "class", class_val, 32);
+                apply_css_for_tag(tag_name, class_val);
+
+                /* Apply inline style */
+                char inline_style[128];
+                extract_attr(tag_full, tf, "style", inline_style, 128);
+                if (inline_style[0])
+                    apply_css_props(inline_style, str_len(inline_style), cur_style());
+
+                /* If display:none, skip until closing tag */
+                if (cur_style()->display_none) {
+                    /* Skip content - we still push/pop but don't render */
+                }
+
+                /* Apply margin-top */
+                draw_y += cur_style()->margin_top;
+                draw_x = 8 + cur_style()->padding_left;
+            }
+
+            /* Check display_none on the CURRENT style (after push for open, before pop for close) */
+            bool hidden = cur_style()->display_none;
+
+            /* Tag-specific layout */
+            if (!hidden) {
+                if (tag_eq(tag_name, tn, "h1")) {
+                    if (!closing) { heading = 1; draw_y += 8; draw_x = 8 + cur_style()->padding_left; }
+                    else { heading = 0; draw_y += 20; draw_x = 8; }
+                } else if (tag_eq(tag_name, tn, "h2")) {
+                    if (!closing) { heading = 2; draw_y += 6; draw_x = 8 + cur_style()->padding_left; }
+                    else { heading = 0; draw_y += 18; draw_x = 8; }
+                } else if (tag_eq(tag_name, tn, "h3") || tag_eq(tag_name, tn, "h4") ||
+                           tag_eq(tag_name, tn, "h5") || tag_eq(tag_name, tn, "h6")) {
+                    if (!closing) { heading = 3; draw_y += 4; draw_x = 8 + cur_style()->padding_left; }
+                    else { heading = 0; draw_y += 16; draw_x = 8; }
+                } else if (tag_eq(tag_name, tn, "p") || tag_eq(tag_name, tn, "div") ||
+                           tag_eq(tag_name, tn, "article") || tag_eq(tag_name, tn, "section") ||
+                           tag_eq(tag_name, tn, "aside") || tag_eq(tag_name, tn, "footer") ||
+                           tag_eq(tag_name, tn, "header") || tag_eq(tag_name, tn, "nav")) {
+                    if (!closing) { draw_y += 6; draw_x = 8 + cur_style()->padding_left; }
+                    else { draw_y += 8; draw_x = 8; }
+                } else if (tag_eq(tag_name, tn, "blockquote")) {
+                    if (!closing) { draw_y += 4; draw_x = 32 + cur_style()->padding_left; }
+                    else { draw_y += 4; draw_x = 8; }
+                } else if (tag_eq(tag_name, tn, "pre") || tag_eq(tag_name, tn, "code")) {
+                    if (!closing) { cur_style()->bold = true; }
+                } else if (tag_eq(tag_name, tn, "b") || tag_eq(tag_name, tn, "strong")) {
+                    if (!closing) cur_style()->bold = true;
+                } else if (tag_eq(tag_name, tn, "i") || tag_eq(tag_name, tn, "em") ||
+                           tag_eq(tag_name, tn, "abbr")) {
+                    if (!closing) cur_style()->italic = true;
+                } else if (tag_eq(tag_name, tn, "u")) {
+                    if (!closing) cur_style()->underline = true;
+                } else if (tag_eq(tag_name, tn, "sub") || tag_eq(tag_name, tn, "sup")) {
+                    if (!closing) cur_style()->italic = true;
+                } else if (tag_eq(tag_name, tn, "br")) {
+                    draw_y += 16;
+                    draw_x = 8 + cur_style()->padding_left;
+                } else if (tag_eq(tag_name, tn, "hr")) {
+                    draw_y += 4;
+                    int rule_y = CONTENT_Y + draw_y - scroll_y;
+                    if (rule_y >= CONTENT_Y && rule_y < CONTENT_Y + CONTENT_H)
+                        brw_rect(buf, cw, ch, 8, rule_y, BRW_W - 16, 1, C_HR);
+                    draw_y += 8;
+                    draw_x = 8;
+                } else if (tag_eq(tag_name, tn, "a")) {
+                    if (!closing) {
+                        in_link = true;
+                        extract_attr(tag_full, tf, "href", current_href, ADDR_MAX);
+                        link_start_x = draw_x;
+                        link_start_y = draw_y;
+                    } else {
+                        if (in_link && link_count < MAX_LINKS && current_href[0]) {
+                            links[link_count].x = link_start_x;
+                            links[link_count].y = link_start_y;
+                            links[link_count].w = draw_x - link_start_x;
+                            links[link_count].h = 16;
+                            str_ncopy(links[link_count].href, current_href, ADDR_MAX);
+                            link_count++;
+                        }
+                        in_link = false;
+                        current_href[0] = '\0';
+                    }
+                } else if (tag_eq(tag_name, tn, "ul") || tag_eq(tag_name, tn, "ol") ||
+                           tag_eq(tag_name, tn, "dl")) {
+                    if (!closing) { in_list = true; draw_y += 4; }
+                    else { in_list = false; draw_y += 4; }
+                } else if (tag_eq(tag_name, tn, "li") || tag_eq(tag_name, tn, "dd")) {
+                    if (!closing) {
+                        draw_y += 2;
+                        draw_x = (in_list ? 24 : 8) + cur_style()->padding_left;
+                        at_li_start = true;
+                    } else {
+                        draw_y += 16; draw_x = 8;
+                    }
+                } else if (tag_eq(tag_name, tn, "dt")) {
+                    if (!closing) { draw_y += 2; draw_x = (in_list ? 16 : 8); cur_style()->bold = true; }
+                } else if (tag_eq(tag_name, tn, "table") || tag_eq(tag_name, tn, "thead") ||
+                           tag_eq(tag_name, tn, "tbody")) {
+                    if (!closing) { draw_y += 4; draw_x = 8; } else { draw_y += 4; }
+                } else if (tag_eq(tag_name, tn, "tr")) {
+                    if (!closing) { draw_x = 8; } else { draw_y += 16; draw_x = 8; }
+                } else if (tag_eq(tag_name, tn, "td") || tag_eq(tag_name, tn, "th")) {
+                    if (!closing) draw_x += 8; else draw_x += 16;
+                }
+            }
+
+            /* On closing tag: draw border-bottom if set, apply margin_bottom, then pop */
+            if (closing) {
+                if (!hidden && cur_style()->has_border_bottom) {
+                    int rule_y = CONTENT_Y + draw_y - scroll_y;
+                    if (rule_y >= CONTENT_Y && rule_y < CONTENT_Y + CONTENT_H)
+                        brw_rect(buf, cw, ch, 8, rule_y, BRW_W - 16, 1, cur_style()->border_bottom_color);
+                    draw_y += 2;
+                }
+                draw_y += cur_style()->margin_bottom;
+                style_pop();
+            }
             continue;
         }
 
-        /* Regular character */
-        char c = page_buf[pos++];
+        /* Skip content inside <style> */
+        if (in_style_tag) { pos++; continue; }
 
-        /* Skip whitespace runs */
+        /* Skip if display:none */
+        if (cur_style()->display_none) { pos++; continue; }
+
+        char c = page_buf[pos++];
         if ((c == '\n' || c == '\r') && pos < page_len) continue;
 
-        /* Determine color */
+        /* Determine text color from style stack */
+        struct render_style *st = cur_style();
         color_t fg;
         if (in_link) {
             fg = C_LINK;
-        } else if (heading == 1) {
-            fg = C_H1;
-        } else if (heading == 2) {
-            fg = C_H2;
-        } else if (heading == 3) {
-            fg = C_H3;
-        } else if (in_bold) {
-            fg = C_BOLD;
-        } else if (in_italic) {
-            fg = C_ITALIC;
+        } else if (st->color != C_TEXT || heading || st->bold || st->italic) {
+            /* Explicit CSS color takes priority */
+            if (st->color != C_TEXT) {
+                fg = st->color;
+            } else if (heading == 1) {
+                fg = C_H1;
+            } else if (heading == 2) {
+                fg = C_H2;
+            } else if (heading == 3) {
+                fg = C_H3;
+            } else if (st->bold) {
+                fg = C_BOLD;
+            } else if (st->italic) {
+                fg = C_ITALIC;
+            } else {
+                fg = st->color;
+            }
         } else {
-            fg = C_TEXT;
+            fg = st->color;
         }
 
         /* Word wrap */
         if (draw_x + 8 > max_x) {
             draw_y += 16;
-            draw_x = in_list ? 24 : 8;
+            draw_x = (in_list ? 24 : 8) + st->padding_left;
         }
 
-        /* Draw bullet at start of list item */
+        /* Bullet */
         if (at_li_start) {
             int bullet_sy = CONTENT_Y + draw_y - scroll_y;
-            if (bullet_sy >= CONTENT_Y && bullet_sy + 16 <= CONTENT_Y + CONTENT_H) {
-                /* Small filled circle (just a square for simplicity) */
+            if (bullet_sy >= CONTENT_Y && bullet_sy + 16 <= CONTENT_Y + CONTENT_H)
                 brw_rect(buf, cw, ch, draw_x - 12, bullet_sy + 6, 4, 4, C_BULLET);
-            }
             at_li_start = false;
         }
 
         /* Draw character if visible */
         int screen_y = CONTENT_Y + draw_y - scroll_y;
-        if (screen_y >= CONTENT_Y - 16 && screen_y < CONTENT_Y + CONTENT_H) {
-            /* Clip to content area */
-            if (screen_y >= CONTENT_Y && screen_y + 16 <= CONTENT_Y + CONTENT_H) {
-                brw_char_transparent(buf, cw, ch, draw_x, screen_y, c, fg);
-                if (in_underline || in_link)
-                    brw_underline(buf, cw, ch, draw_x, screen_y, 8, fg);
-            }
+        if (screen_y >= CONTENT_Y && screen_y + 16 <= CONTENT_Y + CONTENT_H) {
+            /* Draw background if set */
+            if (st->bg_color != C_NONE)
+                brw_rect(buf, cw, ch, draw_x, screen_y, 8, 16, st->bg_color);
+
+            brw_char_transparent(buf, cw, ch, draw_x, screen_y, c, fg);
+            if (st->underline || in_link)
+                brw_underline(buf, cw, ch, draw_x, screen_y, 8, fg);
         }
 
         draw_x += 8;
     }
 
-    /* Record total content height for scroll clamping */
+    /* Scroll clamping */
     content_total_h = draw_y + 20;
     if (scroll_y > content_total_h - CONTENT_H) {
         if (content_total_h > CONTENT_H)
@@ -657,11 +1068,11 @@ void browser_render(void) {
             scroll_y = 0;
     }
 
-    /* ---- Status bar ---- */
+    /* Status bar */
     brw_rect(buf, cw, ch, 0, BRW_H - STATUS_H, BRW_W, STATUS_H, C_STATUS_BG);
     brw_text(buf, cw, ch, 4, BRW_H - STATUS_H + 1, status_msg, C_STATUS_FG, C_STATUS_BG);
 
-    /* Scroll indicator on right side */
+    /* Scrollbar */
     if (content_total_h > CONTENT_H) {
         int track_h = CONTENT_H - 4;
         int thumb_h = (CONTENT_H * track_h) / content_total_h;
