@@ -75,6 +75,7 @@ void fs_init_defaults(void) {
     int home = fs_create("home.htm", FS_FILE);
     if (home >= 0) {
         const char *htm =
+            "<!-- CSS styles: tag selectors and .class selectors -->"
             "<style>"
             "h1 { color: red; text-align: center; }"
             "h2 { color: blue; }"
@@ -84,28 +85,37 @@ void fs_init_defaults(void) {
             ".right { text-align: right; color: teal; }"
             ".center { text-align: center; color: purple; }"
             "</style>"
+            "<!-- Heading: centered + red from h1 rule -->"
             "<h1>Welcome to AI_OS</h1>"
-            "<p>This heading is <b>centered</b> and <b>red</b> using "
+            "<p>This heading is <b>centered</b> and <b>red</b> via "
             "h1 { color: red; text-align: center; }</p>"
+            "<!-- Subheading: blue from h2 rule -->"
             "<h2>CSS and Layout Demo</h2>"
+            "<!-- Word wrapping: long text breaks at spaces -->"
             "<p>Long text wraps at word boundaries instead of breaking "
             "words apart. This paragraph demonstrates that long sentences "
             "will neatly wrap to the next line at spaces.</p>"
             "<hr>"
-            "<p class=\"center\">This text is centered with .center class</p>"
-            "<p class=\"right\">Right-aligned text</p>"
+            "<!-- Text alignment via class selectors -->"
+            "<p class=\"center\">Centered text via .center class</p>"
+            "<p class=\"right\">Right-aligned text via .right class</p>"
             "<hr>"
+            "<!-- Inline color classes on spans -->"
             "<p><span class=\"big\"> White on Red </span> "
             "<span class=\"green\"> Lime on Black </span> "
             "<span class=\"fancy\">Orange Underlined</span></p>"
+            "<!-- Inline styles: color by name, hex, rgb -->"
             "<p>Inline: <span style=\"color: red\">RED</span> "
             "<span style=\"color: blue\">BLUE</span> "
             "<span style=\"color: #ff6600\">HEX</span> "
             "<span style=\"color: rgb(255,0,255)\">RGB</span></p>"
             "<hr>"
+            "<!-- Links to other local files -->"
             "<p>Links: <a href=\"readme.txt\">readme.txt</a> | "
             "<a href=\"demo.htm\">demo page</a></p>"
-            "<p>Scroll: PgUp/PgDn | Back: Backspace</p>";
+            "<!-- Navigation hints -->"
+            "<p>Scroll: PgUp/PgDn | Back: Backspace</p>"
+            "<p>Tabs: Ctrl+T new | Ctrl+W close</p>";
         fs_write_file(home, htm, str_len(htm));
     }
 
@@ -113,19 +123,26 @@ void fs_init_defaults(void) {
     int demo = fs_create("demo.htm", FS_FILE);
     if (demo >= 0) {
         const char *htm =
+            "<!-- Style block: tag and class selectors -->"
             "<style>"
             "h1 { color: crimson; text-align: center; }"
             "p { color: navy; }"
             ".box { background-color: gold; color: black; padding-left: 16; }"
             ".right { text-align: right; color: gray; }"
             "</style>"
+            "<!-- Centered crimson heading -->"
             "<h1>CSS Demo Page</h1>"
+            "<!-- All p tags are navy from: p { color: navy; } -->"
             "<p>All paragraphs are navy blue from: p { color: navy; }</p>"
-            "<div class=\"box\">Gold background box with padding from .box class</div>"
+            "<!-- Div with .box class: gold bg + padding -->"
+            "<div class=\"box\">Gold background box with padding</div>"
+            "<!-- Right-aligned paragraph -->"
             "<p class=\"right\">This text is right-aligned</p>"
+            "<!-- Word wrapping demo -->"
             "<p>This is a longer paragraph to demonstrate word wrapping. "
             "Words should break at spaces, not in the middle of a word. "
             "The text flows naturally from line to line.</p>"
+            "<!-- Navigation link back to home -->"
             "<p>Go <a href=\"home.htm\">back to home</a></p>";
         fs_write_file(demo, htm, str_len(htm));
     }

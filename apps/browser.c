@@ -1,5 +1,5 @@
 /* ===========================================================================
- * Browser - HTML file viewer with CSS support
+ * Browser - HTML file viewer with CSS support and tabbed browsing
  * Renders HTML tags with inline style="", <style> blocks, and .class selectors
  * =========================================================================== */
 #include "browser.h"
@@ -14,9 +14,10 @@
 #define BRW_W       500
 #define BRW_H       360
 #define TOOLBAR_H   26
+#define TAB_BAR_H   18
 #define STATUS_H    18
-#define CONTENT_Y   TOOLBAR_H
-#define CONTENT_H   (BRW_H - TOOLBAR_H - STATUS_H)
+#define CONTENT_Y   (TOOLBAR_H + TAB_BAR_H)
+#define CONTENT_H   (BRW_H - TOOLBAR_H - TAB_BAR_H - STATUS_H)
 
 /* Address bar */
 #define ADDR_X      40
@@ -42,25 +43,16 @@
 #define C_BTN_BG    COLOR_RGB(200, 200, 208)
 #define C_BTN_FG    COLOR_RGB(40, 40, 40)
 #define C_NONE      0xFF000000  /* sentinel: no color set */
+#define C_TAB_BG    COLOR_RGB(200, 202, 210)
+#define C_TAB_ACT   COLOR_RGB(245, 245, 240)
+#define C_TAB_FG    COLOR_RGB(60, 60, 60)
+#define C_TAB_CLOSE COLOR_RGB(150, 50, 50)
 
 /* Page content buffer */
 #define PAGE_BUF_SIZE  8192
-static char page_buf[PAGE_BUF_SIZE];
-static int  page_len = 0;
-
-/* Address bar state */
-static char addr_buf[ADDR_MAX + 1];
-static int  addr_len = 0;
-static bool addr_focused = false;
 
 /* Navigation history */
 #define HISTORY_MAX 16
-static char history[HISTORY_MAX][ADDR_MAX + 1];
-static int  history_count = 0;
-
-/* Scroll */
-static int scroll_y = 0;
-static int content_total_h = 0;
 
 /* Clickable link regions */
 #define MAX_LINKS 32
@@ -68,13 +60,6 @@ struct link_region {
     int x, y, w, h;
     char href[ADDR_MAX + 1];
 };
-static struct link_region links[MAX_LINKS];
-static int link_count = 0;
-static int hovered_link = -1;
-
-/* Window */
-static int win_id = -1;
-static char status_msg[64];
 
 /* ===========================================================================
  * CSS Engine
@@ -102,14 +87,12 @@ static bool ci_eq(const char *a, const char *b) {
     return *a == *b;
 }
 
-/* Skip whitespace, return new position */
 static int skip_ws(const char *s, int pos, int len) {
     while (pos < len && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n' || s[pos] == '\r'))
         pos++;
     return pos;
 }
 
-/* Parse an integer from string, return chars consumed */
 static int parse_int(const char *s, int pos, int len, int *out) {
     int val = 0;
     int start = pos;
@@ -122,10 +105,8 @@ static int parse_int(const char *s, int pos, int len, int *out) {
 }
 
 static color_t parse_color(const char *val) {
-    /* Skip leading whitespace */
     while (*val == ' ') val++;
 
-    /* Named colors */
     if (ci_eq(val, "red"))     return COLOR_RGB(255, 0, 0);
     if (ci_eq(val, "green"))   return COLOR_RGB(0, 128, 0);
     if (ci_eq(val, "blue"))    return COLOR_RGB(0, 0, 255);
@@ -202,7 +183,7 @@ static color_t parse_color(const char *val) {
         return COLOR_RGB(r, g, b);
     }
 
-    return C_NONE;  /* parse failed */
+    return C_NONE;
 }
 
 /* --- CSS Rule Storage --- */
@@ -225,15 +206,13 @@ struct css_rule {
     bool has_border_bottom;
     color_t border_bottom_color;
 };
-static struct css_rule css_rules[MAX_CSS_RULES];
-static int css_rule_count = 0;
 
 /* --- Render Style Stack --- */
 
 #define STYLE_STACK_MAX 16
 struct render_style {
     color_t color;
-    color_t bg_color;  /* C_NONE = transparent/inherit */
+    color_t bg_color;
     bool bold;
     bool italic;
     bool underline;
@@ -276,36 +255,31 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
         p = skip_ws(css, p, css_len);
         if (p >= css_len) break;
 
-        /* Read property name */
         char prop[32];
         int pi = 0;
         while (p < css_len && css[p] != ':' && css[p] != ';' && pi < 31) {
             prop[pi++] = to_lower(css[p++]);
         }
         prop[pi] = '\0';
-        /* Trim trailing spaces from property */
         while (pi > 0 && prop[pi - 1] == ' ') prop[--pi] = '\0';
 
-        if (p >= css_len || css[p] != ':') { /* skip to next ; */
+        if (p >= css_len || css[p] != ':') {
             while (p < css_len && css[p] != ';') p++;
             if (p < css_len) p++;
             continue;
         }
-        p++; /* skip ':' */
+        p++;
         p = skip_ws(css, p, css_len);
 
-        /* Read value */
         char val[64];
         int vi = 0;
         while (p < css_len && css[p] != ';' && css[p] != '}' && vi < 63) {
             val[vi++] = css[p++];
         }
         val[vi] = '\0';
-        /* Trim trailing spaces */
         while (vi > 0 && val[vi - 1] == ' ') val[--vi] = '\0';
         if (p < css_len && css[p] == ';') p++;
 
-        /* Apply property */
         if (ci_eq(prop, "color")) {
             color_t c = parse_color(val);
             if (c != C_NONE) st->color = c;
@@ -333,14 +307,9 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
         } else if (ci_eq(prop, "display")) {
             st->display_none = ci_eq(val, "none");
         } else if (ci_eq(prop, "border-bottom")) {
-            /* Simple: just treat any border-bottom as a colored line */
             st->has_border_bottom = true;
-            /* Try to find a color in the value */
-            /* value like "1px solid red" or "2px solid #333" */
-            /* Scan for a color token */
             char *tok = val;
             color_t bc = C_NONE;
-            /* Try parsing from each space-separated token */
             for (int i = 0; i < vi; i++) {
                 if (i == 0 || val[i - 1] == ' ') {
                     bc = parse_color(val + i);
@@ -353,7 +322,6 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
     }
 }
 
-/* Apply a CSS rule to a render_style */
 static void apply_rule(struct css_rule *r, struct render_style *st) {
     if (r->has_color) st->color = r->color;
     if (r->has_bg) st->bg_color = r->bg_color;
@@ -374,7 +342,6 @@ static void apply_rule(struct css_rule *r, struct render_style *st) {
 /* --- Parse <style> block into css_rules --- */
 
 static void parse_css_rule_body(const char *body, int blen, struct css_rule *rule) {
-    /* Parse CSS properties and fill the rule struct */
     struct render_style tmp;
     mem_set(&tmp, 0, sizeof(tmp));
     tmp.color = C_NONE;
@@ -400,13 +367,12 @@ static void parse_css_rule_body(const char *body, int blen, struct css_rule *rul
     if (tmp.has_border_bottom) { rule->has_border_bottom = true; rule->border_bottom_color = tmp.border_bottom_color; }
 }
 
-static void parse_style_block(const char *css, int css_len) {
+static void parse_style_block(const char *css, int css_len, struct css_rule *rules, int *rule_count) {
     int p = 0;
-    while (p < css_len && css_rule_count < MAX_CSS_RULES) {
+    while (p < css_len && *rule_count < MAX_CSS_RULES) {
         p = skip_ws(css, p, css_len);
         if (p >= css_len) break;
 
-        /* Skip CSS comments */
         if (p + 1 < css_len && css[p] == '/' && css[p + 1] == '*') {
             p += 2;
             while (p + 1 < css_len && !(css[p] == '*' && css[p + 1] == '/')) p++;
@@ -414,32 +380,27 @@ static void parse_style_block(const char *css, int css_len) {
             continue;
         }
 
-        /* Read selector */
         char sel[32];
         int si = 0;
         while (p < css_len && css[p] != '{' && si < 31) {
             sel[si++] = css[p++];
         }
         sel[si] = '\0';
-        /* Trim trailing spaces */
         while (si > 0 && sel[si - 1] == ' ') sel[--si] = '\0';
 
         if (p >= css_len || css[p] != '{') break;
-        p++; /* skip '{' */
+        p++;
 
-        /* Read body until '}' */
         int body_start = p;
         while (p < css_len && css[p] != '}') p++;
         int body_len = p - body_start;
-        if (p < css_len) p++; /* skip '}' */
+        if (p < css_len) p++;
 
         if (si == 0) continue;
 
-        /* Handle comma-separated selectors: "h1, h2, h3 { ... }" */
         int sel_start = 0;
         for (int i = 0; i <= si; i++) {
             if (i == si || sel[i] == ',') {
-                /* Extract one selector */
                 char one_sel[32];
                 int os = 0;
                 int j = sel_start;
@@ -451,69 +412,36 @@ static void parse_style_block(const char *css, int css_len) {
                 one_sel[os] = '\0';
                 sel_start = i + 1;
 
-                if (os > 0 && css_rule_count < MAX_CSS_RULES) {
-                    struct css_rule *r = &css_rules[css_rule_count];
+                if (os > 0 && *rule_count < MAX_CSS_RULES) {
+                    struct css_rule *r = &rules[*rule_count];
                     mem_set(r, 0, sizeof(*r));
                     str_ncopy(r->selector, one_sel, 31);
                     parse_css_rule_body(css + body_start, body_len, r);
-                    css_rule_count++;
+                    (*rule_count)++;
                 }
             }
         }
     }
 }
 
-/* Scan page_buf for <style>...</style> and parse them */
-static void extract_and_parse_styles(void) {
-    css_rule_count = 0;
-    int p = 0;
-    while (p < page_len - 7) {
-        /* Find <style */
-        if (page_buf[p] == '<' &&
-            to_lower(page_buf[p+1]) == 's' && to_lower(page_buf[p+2]) == 't' &&
-            to_lower(page_buf[p+3]) == 'y' && to_lower(page_buf[p+4]) == 'l' &&
-            to_lower(page_buf[p+5]) == 'e') {
-            /* Skip to > */
-            p += 6;
-            while (p < page_len && page_buf[p] != '>') p++;
-            if (p < page_len) p++;
-            int start = p;
-            /* Find </style> */
-            while (p < page_len - 8) {
-                if (page_buf[p] == '<' && page_buf[p+1] == '/' &&
-                    to_lower(page_buf[p+2]) == 's' && to_lower(page_buf[p+3]) == 't' &&
-                    to_lower(page_buf[p+4]) == 'y' && to_lower(page_buf[p+5]) == 'l' &&
-                    to_lower(page_buf[p+6]) == 'e') {
-                    parse_style_block(page_buf + start, p - start);
-                    break;
-                }
-                p++;
-            }
-        }
-        p++;
-    }
-}
-
-/* Look up CSS rules matching a tag and class, apply to current style */
-static void apply_css_for_tag(const char *tag_name, const char *class_name) {
+static void apply_css_for_tag(const char *tag_name, const char *class_name,
+                              struct css_rule *rules, int rule_count) {
     struct render_style *st = cur_style();
     char lower_tag[16];
     int ti = 0;
     while (tag_name[ti] && ti < 15) { lower_tag[ti] = to_lower(tag_name[ti]); ti++; }
     lower_tag[ti] = '\0';
 
-    for (int i = 0; i < css_rule_count; i++) {
-        struct css_rule *r = &css_rules[i];
+    for (int i = 0; i < rule_count; i++) {
+        struct css_rule *r = &rules[i];
         bool match = false;
 
         if (r->selector[0] == '.') {
-            /* Class selector */
             if (class_name[0] && ci_eq(r->selector + 1, class_name))
                 match = true;
         } else if (ci_eq(r->selector, "*")) {
             match = true;
         } else {
-            /* Tag selector */
             if (ci_eq(r->selector, lower_tag))
                 match = true;
         }
@@ -548,6 +476,77 @@ static void extract_attr(const char *tag, int tlen, const char *attr_name, char 
         }
         out[k] = '\0';
         return;
+    }
+}
+
+/* Case-insensitive tag name compare */
+static bool tag_eq(const char *tag, int tlen, const char *name) {
+    int nlen = str_len(name);
+    if (tlen != nlen) return false;
+    for (int i = 0; i < tlen; i++) {
+        if (to_lower(tag[i]) != to_lower(name[i])) return false;
+    }
+    return true;
+}
+
+/* ===========================================================================
+ * Tab State
+ * =========================================================================== */
+
+#define MAX_TABS 4
+
+struct browser_tab {
+    char page_buf[PAGE_BUF_SIZE];
+    int page_len;
+    char addr_buf[ADDR_MAX + 1];
+    int addr_len;
+    int scroll_y;
+    int content_total_h;
+    struct link_region links[MAX_LINKS];
+    int link_count;
+    int hovered_link;
+    struct css_rule css_rules[MAX_CSS_RULES];
+    int css_rule_count;
+    char history[HISTORY_MAX][ADDR_MAX + 1];
+    int history_count;
+    bool used;
+};
+
+static struct browser_tab tabs[MAX_TABS];
+static int active_tab = 0;
+static int tab_count = 0;
+static bool addr_focused = false;
+static int win_id = -1;
+static char status_msg[64];
+
+#define T (&tabs[active_tab])
+
+/* Extract and parse <style> blocks from a tab's page_buf */
+static void extract_and_parse_styles(struct browser_tab *tab) {
+    tab->css_rule_count = 0;
+    int p = 0;
+    while (p < tab->page_len - 7) {
+        if (tab->page_buf[p] == '<' &&
+            to_lower(tab->page_buf[p+1]) == 's' && to_lower(tab->page_buf[p+2]) == 't' &&
+            to_lower(tab->page_buf[p+3]) == 'y' && to_lower(tab->page_buf[p+4]) == 'l' &&
+            to_lower(tab->page_buf[p+5]) == 'e') {
+            p += 6;
+            while (p < tab->page_len && tab->page_buf[p] != '>') p++;
+            if (p < tab->page_len) p++;
+            int start = p;
+            while (p < tab->page_len - 8) {
+                if (tab->page_buf[p] == '<' && tab->page_buf[p+1] == '/' &&
+                    to_lower(tab->page_buf[p+2]) == 's' && to_lower(tab->page_buf[p+3]) == 't' &&
+                    to_lower(tab->page_buf[p+4]) == 'y' && to_lower(tab->page_buf[p+5]) == 'l' &&
+                    to_lower(tab->page_buf[p+6]) == 'e') {
+                    parse_style_block(tab->page_buf + start, p - start,
+                                      tab->css_rules, &tab->css_rule_count);
+                    break;
+                }
+                p++;
+            }
+        }
+        p++;
     }
 }
 
@@ -603,71 +602,60 @@ static void brw_underline(color_t *buf, int cw, int ch, int px, int py, int char
     }
 }
 
-/* Case-insensitive tag name compare */
-static bool tag_eq(const char *tag, int tlen, const char *name) {
-    int nlen = str_len(name);
-    if (tlen != nlen) return false;
-    for (int i = 0; i < tlen; i++) {
-        if (to_lower(tag[i]) != to_lower(name[i])) return false;
-    }
-    return true;
-}
-
 /* ---- Page loading ---- */
 
-static void load_page(const char *filename) {
-    if (addr_len > 0 && history_count < HISTORY_MAX) {
-        str_copy(history[history_count], addr_buf);
-        history_count++;
+static void load_page(struct browser_tab *tab, const char *filename) {
+    if (tab->addr_len > 0 && tab->history_count < HISTORY_MAX) {
+        str_copy(tab->history[tab->history_count], tab->addr_buf);
+        tab->history_count++;
     }
 
     int i = 0;
-    while (filename[i] && i < ADDR_MAX) { addr_buf[i] = filename[i]; i++; }
-    addr_buf[i] = '\0';
-    addr_len = i;
+    while (filename[i] && i < ADDR_MAX) { tab->addr_buf[i] = filename[i]; i++; }
+    tab->addr_buf[i] = '\0';
+    tab->addr_len = i;
 
     int idx = fs_find(filename);
     if (idx < 0) {
         const char *err = "<h1>File Not Found</h1><p>Could not find: ";
         int elen = str_len(err);
-        mem_copy(page_buf, err, (uint32_t)elen);
+        mem_copy(tab->page_buf, err, (uint32_t)elen);
         int pos = elen;
         for (int j = 0; filename[j] && pos < PAGE_BUF_SIZE - 10; j++)
-            page_buf[pos++] = filename[j];
-        page_buf[pos++] = '<'; page_buf[pos++] = '/'; page_buf[pos++] = 'p'; page_buf[pos++] = '>';
-        page_len = pos;
+            tab->page_buf[pos++] = filename[j];
+        tab->page_buf[pos++] = '<'; tab->page_buf[pos++] = '/';
+        tab->page_buf[pos++] = 'p'; tab->page_buf[pos++] = '>';
+        tab->page_len = pos;
     } else {
         struct fs_node *f = fs_get_node(idx);
         if (!f || f->type != FS_FILE || !f->data) {
             const char *err = "<h1>Error</h1><p>Cannot read file.</p>";
-            page_len = str_len(err);
-            mem_copy(page_buf, err, (uint32_t)page_len);
+            tab->page_len = str_len(err);
+            mem_copy(tab->page_buf, err, (uint32_t)tab->page_len);
         } else {
             int len = (int)f->size;
             if (len > PAGE_BUF_SIZE - 1) len = PAGE_BUF_SIZE - 1;
-            mem_copy(page_buf, f->data, (uint32_t)len);
-            page_len = len;
+            mem_copy(tab->page_buf, f->data, (uint32_t)len);
+            tab->page_len = len;
         }
     }
-    page_buf[page_len] = '\0';
+    tab->page_buf[tab->page_len] = '\0';
 
-    /* Parse CSS from <style> blocks */
-    extract_and_parse_styles();
-
-    scroll_y = 0;
-    link_count = 0;
-    hovered_link = -1;
+    extract_and_parse_styles(tab);
+    tab->scroll_y = 0;
+    tab->link_count = 0;
+    tab->hovered_link = -1;
     str_copy(status_msg, "Ready");
 }
 
-static void navigate_back(void) {
-    if (history_count <= 0) return;
-    history_count--;
+static void navigate_back(struct browser_tab *tab) {
+    if (tab->history_count <= 0) return;
+    tab->history_count--;
     int i = 0;
-    const char *filename = history[history_count];
-    while (filename[i] && i < ADDR_MAX) { addr_buf[i] = filename[i]; i++; }
-    addr_buf[i] = '\0';
-    addr_len = i;
+    const char *filename = tab->history[tab->history_count];
+    while (filename[i] && i < ADDR_MAX) { tab->addr_buf[i] = filename[i]; i++; }
+    tab->addr_buf[i] = '\0';
+    tab->addr_len = i;
 
     int idx = fs_find(filename);
     if (idx >= 0) {
@@ -675,16 +663,47 @@ static void navigate_back(void) {
         if (f && f->type == FS_FILE && f->data) {
             int len = (int)f->size;
             if (len > PAGE_BUF_SIZE - 1) len = PAGE_BUF_SIZE - 1;
-            mem_copy(page_buf, f->data, (uint32_t)len);
-            page_len = len;
-            page_buf[page_len] = '\0';
+            mem_copy(tab->page_buf, f->data, (uint32_t)len);
+            tab->page_len = len;
+            tab->page_buf[tab->page_len] = '\0';
         }
     }
-    extract_and_parse_styles();
-    scroll_y = 0;
-    link_count = 0;
-    hovered_link = -1;
+    extract_and_parse_styles(tab);
+    tab->scroll_y = 0;
+    tab->link_count = 0;
+    tab->hovered_link = -1;
     str_copy(status_msg, "Ready");
+}
+
+/* ---- Tab management ---- */
+
+static int new_tab(const char *url) {
+    if (tab_count >= MAX_TABS) return -1;
+    int idx = -1;
+    for (int i = 0; i < MAX_TABS; i++) {
+        if (!tabs[i].used) { idx = i; break; }
+    }
+    if (idx < 0) return -1;
+    mem_set(&tabs[idx], 0, sizeof(struct browser_tab));
+    tabs[idx].used = true;
+    tabs[idx].hovered_link = -1;
+    tab_count++;
+    active_tab = idx;
+    load_page(&tabs[idx], url);
+    return idx;
+}
+
+static void close_tab(int idx) {
+    if (tab_count <= 1) return;
+    if (idx < 0 || idx >= MAX_TABS || !tabs[idx].used) return;
+    tabs[idx].used = false;
+    tab_count--;
+    if (active_tab == idx) {
+        /* Find next available tab */
+        for (int i = 0; i < MAX_TABS; i++) {
+            if (tabs[i].used) { active_tab = i; break; }
+        }
+    }
 }
 
 /* ---- Event handler ---- */
@@ -692,60 +711,99 @@ static void navigate_back(void) {
 static void brw_on_event(struct window *win, struct gui_event *evt) {
     if (evt->type == EVT_KEY_PRESS) {
         uint8_t k = evt->key;
+
+        /* Ctrl+T = new tab (ASCII 0x14) */
+        if (k == 0x14) { new_tab("home.htm"); return; }
+        /* Ctrl+W = close tab (ASCII 0x17) */
+        if (k == 0x17) { close_tab(active_tab); return; }
+
         if (addr_focused) {
             if (k == '\n') {
-                if (addr_len > 0) {
-                    addr_buf[addr_len] = '\0';
+                if (T->addr_len > 0) {
+                    T->addr_buf[T->addr_len] = '\0';
                     char tmp[ADDR_MAX + 1];
-                    str_copy(tmp, addr_buf);
-                    addr_len = 0;
-                    load_page(tmp);
+                    str_copy(tmp, T->addr_buf);
+                    T->addr_len = 0;
+                    load_page(T, tmp);
                 }
                 addr_focused = false;
                 return;
             }
             if (k == 0x1B) { addr_focused = false; return; }
-            if (k == '\b') { if (addr_len > 0) addr_len--; return; }
-            if (k >= 0x20 && k < 0x80 && addr_len < ADDR_MAX) {
-                addr_buf[addr_len++] = (char)k;
+            if (k == '\b') { if (T->addr_len > 0) T->addr_len--; return; }
+            if (k >= 0x20 && k < 0x80 && T->addr_len < ADDR_MAX) {
+                T->addr_buf[T->addr_len++] = (char)k;
                 return;
             }
             return;
         }
-        if (k == KEY_UP)   { scroll_y -= 16; if (scroll_y < 0) scroll_y = 0; return; }
-        if (k == KEY_DOWN) { scroll_y += 16; return; }
-        if (k == KEY_PGUP) { scroll_y -= CONTENT_H; if (scroll_y < 0) scroll_y = 0; return; }
-        if (k == KEY_PGDN) { scroll_y += CONTENT_H; return; }
-        if (k == KEY_HOME) { scroll_y = 0; return; }
-        if (k == KEY_END)  { scroll_y = content_total_h - CONTENT_H; if (scroll_y < 0) scroll_y = 0; return; }
-        if (k == '\b') { navigate_back(); return; }
+        if (k == KEY_UP)   { T->scroll_y -= 16; if (T->scroll_y < 0) T->scroll_y = 0; return; }
+        if (k == KEY_DOWN) { T->scroll_y += 16; return; }
+        if (k == KEY_PGUP) { T->scroll_y -= CONTENT_H; if (T->scroll_y < 0) T->scroll_y = 0; return; }
+        if (k == KEY_PGDN) { T->scroll_y += CONTENT_H; return; }
+        if (k == KEY_HOME) { T->scroll_y = 0; return; }
+        if (k == KEY_END)  { T->scroll_y = T->content_total_h - CONTENT_H; if (T->scroll_y < 0) T->scroll_y = 0; return; }
+        if (k == '\b') { navigate_back(T); return; }
         if (k == '\t') { addr_focused = true; return; }
-        if (k == 12) { addr_focused = true; addr_len = 0; return; }
+        if (k == 12) { addr_focused = true; T->addr_len = 0; return; }
         return;
     }
 
     if (evt->type == EVT_MOUSE_DOWN) {
         int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
         int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
-        if (mx >= 4 && mx < 34 && my >= 4 && my < 22) { navigate_back(); return; }
+
+        /* Toolbar: back button */
+        if (mx >= 4 && mx < 34 && my >= 4 && my < 22) { navigate_back(T); return; }
+        /* Toolbar: Go button */
         if (mx >= BRW_W - 36 && mx < BRW_W - 4 && my >= 4 && my < 22) {
-            if (addr_len > 0) {
-                addr_buf[addr_len] = '\0';
+            if (T->addr_len > 0) {
+                T->addr_buf[T->addr_len] = '\0';
                 char tmp[ADDR_MAX + 1];
-                str_copy(tmp, addr_buf);
-                addr_len = 0;
-                load_page(tmp);
+                str_copy(tmp, T->addr_buf);
+                T->addr_len = 0;
+                load_page(T, tmp);
             }
             return;
         }
+        /* Toolbar: address bar */
         if (mx >= ADDR_X && mx < ADDR_X + ADDR_W && my >= 4 && my < 22) { addr_focused = true; return; }
+
+        /* Tab bar clicks */
+        if (my >= TOOLBAR_H && my < TOOLBAR_H + TAB_BAR_H) {
+            int tx = 2;
+            for (int i = 0; i < MAX_TABS; i++) {
+                if (!tabs[i].used) continue;
+                int tw = str_len(tabs[i].addr_buf) * 8 + 28; /* text + padding + close btn */
+                if (tw < 60) tw = 60;
+                if (tw > 120) tw = 120;
+                if (mx >= tx && mx < tx + tw) {
+                    /* Check if click is on close "x" (rightmost 16px of tab) */
+                    if (mx >= tx + tw - 16 && tab_count > 1) {
+                        close_tab(i);
+                    } else {
+                        active_tab = i;
+                    }
+                    return;
+                }
+                tx += tw + 2;
+            }
+            /* "+" new tab button */
+            if (mx >= tx && mx < tx + 20 && tab_count < MAX_TABS) {
+                new_tab("home.htm");
+                return;
+            }
+            return;
+        }
+
+        /* Content area: link clicks */
         if (my >= CONTENT_Y && my < CONTENT_Y + CONTENT_H) {
             int content_mx = mx;
-            int content_my = my - CONTENT_Y + scroll_y;
-            for (int i = 0; i < link_count; i++) {
-                if (content_mx >= links[i].x && content_mx < links[i].x + links[i].w &&
-                    content_my >= links[i].y && content_my < links[i].y + links[i].h) {
-                    load_page(links[i].href); return;
+            int content_my = my - CONTENT_Y + T->scroll_y;
+            for (int i = 0; i < T->link_count; i++) {
+                if (content_mx >= T->links[i].x && content_mx < T->links[i].x + T->links[i].w &&
+                    content_my >= T->links[i].y && content_my < T->links[i].y + T->links[i].h) {
+                    load_page(T, T->links[i].href); return;
                 }
             }
             addr_focused = false;
@@ -755,15 +813,15 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
     if (evt->type == EVT_MOUSE_MOVE) {
         int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
         int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
-        hovered_link = -1;
+        T->hovered_link = -1;
         if (my >= CONTENT_Y && my < CONTENT_Y + CONTENT_H) {
             int content_mx = mx;
-            int content_my = my - CONTENT_Y + scroll_y;
-            for (int i = 0; i < link_count; i++) {
-                if (content_mx >= links[i].x && content_mx < links[i].x + links[i].w &&
-                    content_my >= links[i].y && content_my < links[i].y + links[i].h) {
-                    hovered_link = i;
-                    str_copy(status_msg, links[i].href);
+            int content_my = my - CONTENT_Y + T->scroll_y;
+            for (int i = 0; i < T->link_count; i++) {
+                if (content_mx >= T->links[i].x && content_mx < T->links[i].x + T->links[i].w &&
+                    content_my >= T->links[i].y && content_my < T->links[i].y + T->links[i].h) {
+                    T->hovered_link = i;
+                    str_copy(status_msg, T->links[i].href);
                     return;
                 }
             }
@@ -781,9 +839,10 @@ void browser_create(void) {
     }
     win_id = wm_create_window("Browser", 40, 30, BRW_W, BRW_H, brw_on_event, NULL);
     str_copy(status_msg, "Ready");
-    addr_len = 0;
-    history_count = 0;
-    load_page("home.htm");
+    tab_count = 0;
+    active_tab = 0;
+    for (int i = 0; i < MAX_TABS; i++) tabs[i].used = false;
+    new_tab("home.htm");
 }
 
 bool browser_is_alive(void) {
@@ -792,13 +851,11 @@ bool browser_is_alive(void) {
     return (w && w->alive);
 }
 
-/* Measure the width (in pixels) of the next word starting at page_buf[pos].
- * A "word" is a run of non-space, non-tag characters.
- * Returns width in pixels (chars * 8). */
-static int measure_word(int pos) {
+/* Measure next word width in pixels */
+static int measure_word(const char *pbuf, int plen, int pos) {
     int chars = 0;
-    while (pos < page_len) {
-        char c = page_buf[pos];
+    while (pos < plen) {
+        char c = pbuf[pos];
         if (c == '<' || c == ' ' || c == '\t' || c == '\n' || c == '\r') break;
         chars++;
         pos++;
@@ -806,23 +863,19 @@ static int measure_word(int pos) {
     return chars * 8;
 }
 
-/* Measure the width of text from pos until the next line break.
- * Line breaks occur at: block tags, <br>, line wrap, or end of content.
- * This accounts for word wrapping at max_w. */
-static int measure_line_width(int pos, int start_x, int max_w) {
+/* Measure line width for text alignment */
+static int measure_line_width(const char *pbuf, int plen, int pos, int start_x, int max_w) {
     int x = start_x;
-    while (pos < page_len) {
-        char c = page_buf[pos];
+    while (pos < plen) {
+        char c = pbuf[pos];
         if (c == '<') {
-            /* Check if this tag causes a line break */
             int tp = pos + 1;
-            if (tp < page_len && page_buf[tp] == '/') tp++;
+            if (tp < plen && pbuf[tp] == '/') tp++;
             char tn[16];
             int ti = 0;
-            while (tp < page_len && page_buf[tp] != '>' && page_buf[tp] != ' ' && ti < 15)
-                tn[ti++] = to_lower(page_buf[tp++]);
+            while (tp < plen && pbuf[tp] != '>' && pbuf[tp] != ' ' && ti < 15)
+                tn[ti++] = to_lower(pbuf[tp++]);
             tn[ti] = '\0';
-            /* Block-level tags cause line breaks */
             if (ti > 0 && (
                 tag_eq(tn, ti, "p") || tag_eq(tn, ti, "div") || tag_eq(tn, ti, "br") ||
                 tag_eq(tn, ti, "h1") || tag_eq(tn, ti, "h2") || tag_eq(tn, ti, "h3") ||
@@ -831,18 +884,16 @@ static int measure_line_width(int pos, int start_x, int max_w) {
                 tag_eq(tn, ti, "ol") || tag_eq(tn, ti, "tr") ||
                 tag_eq(tn, ti, "blockquote")))
                 break;
-            /* Skip past this inline tag */
-            while (pos < page_len && page_buf[pos] != '>') pos++;
-            if (pos < page_len) pos++;
+            while (pos < plen && pbuf[pos] != '>') pos++;
+            if (pos < plen) pos++;
             continue;
         }
         if (c == '\n' || c == '\r') { pos++; continue; }
-        /* Would this character cause a word-wrap? */
         if (c == ' ') {
-            int ww = measure_word(pos + 1);
-            if (ww > 0 && x + 8 + ww > max_w) break; /* next word won't fit */
+            int ww = measure_word(pbuf, plen, pos + 1);
+            if (ww > 0 && x + 8 + ww > max_w) break;
         }
-        if (x + 8 > max_w) break; /* character wrap */
+        if (x + 8 > max_w) break;
         x += 8;
         pos++;
     }
@@ -853,6 +904,7 @@ void browser_render(void) {
     if (win_id < 0) return;
     struct window *win = wm_get_window(win_id);
     if (!win || !win->alive || !win->content || win->on_event != brw_on_event) { win_id = -1; return; }
+    if (!T->used) return;
 
     int cw = win->content_w;
     int ch = win->content_h;
@@ -869,24 +921,66 @@ void browser_render(void) {
     brw_rect(buf, cw, ch, ADDR_X, 21, ADDR_W, 1, COLOR_RGB(180, 180, 180));
     brw_rect(buf, cw, ch, ADDR_X, 4, 1, 18, COLOR_RGB(180, 180, 180));
     brw_rect(buf, cw, ch, ADDR_X + ADDR_W - 1, 4, 1, 18, COLOR_RGB(180, 180, 180));
-    addr_buf[addr_len] = '\0';
-    if (addr_len > 0) {
+    T->addr_buf[T->addr_len] = '\0';
+    if (T->addr_len > 0) {
         int max_chars = (ADDR_W - 8) / 8;
         int start = 0;
-        if (addr_len > max_chars) start = addr_len - max_chars;
-        brw_text(buf, cw, ch, ADDR_X + 4, 5, addr_buf + start, C_ADDR_FG, C_ADDR_BG);
+        if (T->addr_len > max_chars) start = T->addr_len - max_chars;
+        brw_text(buf, cw, ch, ADDR_X + 4, 5, T->addr_buf + start, C_ADDR_FG, C_ADDR_BG);
     }
     if (addr_focused && (timer_get_ticks() / 40) & 1) {
         int max_chars = (ADDR_W - 8) / 8;
-        int visible_len = addr_len;
+        int visible_len = T->addr_len;
         if (visible_len > max_chars) visible_len = max_chars;
         brw_rect(buf, cw, ch, ADDR_X + 4 + visible_len * 8, 5, 2, 16, COLOR_RGB(0, 80, 200));
     }
     brw_rect(buf, cw, ch, BRW_W - 36, 4, 32, 18, C_BTN_BG);
     brw_text(buf, cw, ch, BRW_W - 32, 5, "Go", C_BTN_FG, C_BTN_BG);
 
+    /* Tab bar */
+    brw_rect(buf, cw, ch, 0, TOOLBAR_H, cw, TAB_BAR_H, C_TAB_BG);
+    int tx = 2;
+    for (int i = 0; i < MAX_TABS; i++) {
+        if (!tabs[i].used) continue;
+        int name_len = tabs[i].addr_len;
+        int tw = name_len * 8 + 28;
+        if (tw < 60) tw = 60;
+        if (tw > 120) tw = 120;
+        color_t tbg = (i == active_tab) ? C_TAB_ACT : C_TAB_BG;
+        brw_rect(buf, cw, ch, tx, TOOLBAR_H + 1, tw, TAB_BAR_H - 1, tbg);
+        /* Tab border */
+        brw_rect(buf, cw, ch, tx, TOOLBAR_H + 1, 1, TAB_BAR_H - 1, COLOR_RGB(180, 180, 185));
+        brw_rect(buf, cw, ch, tx + tw - 1, TOOLBAR_H + 1, 1, TAB_BAR_H - 1, COLOR_RGB(180, 180, 185));
+        if (i == active_tab)
+            brw_rect(buf, cw, ch, tx, TOOLBAR_H, tw, 1, C_TAB_ACT);
+        else
+            brw_rect(buf, cw, ch, tx, TOOLBAR_H, tw, 1, COLOR_RGB(180, 180, 185));
+        /* Tab title (truncated) */
+        tabs[i].addr_buf[tabs[i].addr_len] = '\0';
+        int max_title = (tw - 24) / 8;
+        if (max_title > 0) {
+            char title[16];
+            int tl = 0;
+            while (tl < max_title && tl < 15 && tabs[i].addr_buf[tl]) {
+                title[tl] = tabs[i].addr_buf[tl]; tl++;
+            }
+            title[tl] = '\0';
+            brw_text(buf, cw, ch, tx + 4, TOOLBAR_H + 2, title, C_TAB_FG, tbg);
+        }
+        /* Close "x" */
+        brw_text(buf, cw, ch, tx + tw - 14, TOOLBAR_H + 2, "x", C_TAB_CLOSE, tbg);
+        tx += tw + 2;
+    }
+    /* "+" new tab button */
+    if (tab_count < MAX_TABS) {
+        brw_rect(buf, cw, ch, tx, TOOLBAR_H + 1, 20, TAB_BAR_H - 1, C_TAB_BG);
+        brw_text(buf, cw, ch, tx + 6, TOOLBAR_H + 2, "+", C_TAB_FG, C_TAB_BG);
+    }
+
     /* ---- Render HTML content with CSS ---- */
-    link_count = 0;
+    T->link_count = 0;
+    char *page_buf = T->page_buf;
+    int page_len = T->page_len;
 
     /* Initialize style stack */
     style_depth = 0;
@@ -901,9 +995,9 @@ void browser_render(void) {
     bool in_link = false;
     bool in_list = false;
     bool at_li_start = false;
-    bool in_style_tag = false;  /* skip content inside <style>...</style> */
-    bool last_was_space = true; /* for whitespace collapsing; start true to skip leading spaces */
-    bool line_start = true;     /* at start of a new line (for alignment) */
+    bool in_style_tag = false;
+    bool last_was_space = true;
+    bool line_start = true;
     char current_href[ADDR_MAX + 1];
     int link_start_x = 0, link_start_y = 0;
     current_href[0] = '\0';
@@ -911,6 +1005,20 @@ void browser_render(void) {
     int pos = 0;
     while (pos < page_len) {
         if (page_buf[pos] == '<') {
+            /* HTML comment: <!-- ... --> */
+            if (pos + 3 < page_len && page_buf[pos+1] == '!' &&
+                page_buf[pos+2] == '-' && page_buf[pos+3] == '-') {
+                pos += 4;
+                while (pos + 2 < page_len) {
+                    if (page_buf[pos] == '-' && page_buf[pos+1] == '-' && page_buf[pos+2] == '>') {
+                        pos += 3;
+                        break;
+                    }
+                    pos++;
+                }
+                continue;
+            }
+
             pos++;
             bool closing = false;
             if (pos < page_len && page_buf[pos] == '/') { closing = true; pos++; }
@@ -928,40 +1036,31 @@ void browser_render(void) {
                 tag_name[tn++] = tag_full[i];
             tag_name[tn] = '\0';
 
-            /* Handle <style> tag: skip its content (already parsed) */
             if (tag_eq(tag_name, tn, "style")) {
                 in_style_tag = !closing;
                 continue;
             }
             if (in_style_tag) continue;
 
-            /* Check for display:none in matching CSS or inline style */
             if (!closing) {
                 style_push();
 
-                /* Apply CSS rules for this tag */
                 char class_val[32];
                 extract_attr(tag_full, tf, "class", class_val, 32);
-                apply_css_for_tag(tag_name, class_val);
+                apply_css_for_tag(tag_name, class_val, T->css_rules, T->css_rule_count);
 
-                /* Apply inline style */
                 char inline_style[128];
                 extract_attr(tag_full, tf, "style", inline_style, 128);
                 if (inline_style[0])
                     apply_css_props(inline_style, str_len(inline_style), cur_style());
 
-                /* If display:none, skip until closing tag */
                 if (cur_style()->display_none) {
                     /* Skip content - we still push/pop but don't render */
                 }
-
-                /* margin-top and padding_left are applied by block-level tag handlers below */
             }
 
-            /* Check display_none on the CURRENT style (after push for open, before pop for close) */
             bool hidden = cur_style()->display_none;
 
-            /* Tag-specific layout */
             if (!hidden) {
                 bool is_block = false;
                 if (tag_eq(tag_name, tn, "h1")) {
@@ -1005,7 +1104,7 @@ void browser_render(void) {
                     is_block = true;
                 } else if (tag_eq(tag_name, tn, "hr")) {
                     draw_y += 4;
-                    int rule_y = CONTENT_Y + draw_y - scroll_y;
+                    int rule_y = CONTENT_Y + draw_y - T->scroll_y;
                     if (rule_y >= CONTENT_Y && rule_y < CONTENT_Y + CONTENT_H)
                         brw_rect(buf, cw, ch, 8, rule_y, BRW_W - 16, 1, C_HR);
                     draw_y += 8;
@@ -1018,13 +1117,13 @@ void browser_render(void) {
                         link_start_x = draw_x;
                         link_start_y = draw_y;
                     } else {
-                        if (in_link && link_count < MAX_LINKS && current_href[0]) {
-                            links[link_count].x = link_start_x;
-                            links[link_count].y = link_start_y;
-                            links[link_count].w = draw_x - link_start_x;
-                            links[link_count].h = 16;
-                            str_ncopy(links[link_count].href, current_href, ADDR_MAX);
-                            link_count++;
+                        if (in_link && T->link_count < MAX_LINKS && current_href[0]) {
+                            T->links[T->link_count].x = link_start_x;
+                            T->links[T->link_count].y = link_start_y;
+                            T->links[T->link_count].w = draw_x - link_start_x;
+                            T->links[T->link_count].h = 16;
+                            str_ncopy(T->links[T->link_count].href, current_href, ADDR_MAX);
+                            T->link_count++;
                         }
                         in_link = false;
                         current_href[0] = '\0';
@@ -1063,10 +1162,9 @@ void browser_render(void) {
                 }
             }
 
-            /* On closing tag: draw border-bottom if set, apply margin_bottom, then pop */
             if (closing) {
                 if (!hidden && cur_style()->has_border_bottom) {
-                    int rule_y = CONTENT_Y + draw_y - scroll_y;
+                    int rule_y = CONTENT_Y + draw_y - T->scroll_y;
                     if (rule_y >= CONTENT_Y && rule_y < CONTENT_Y + CONTENT_H)
                         brw_rect(buf, cw, ch, 8, rule_y, BRW_W - 16, 1, cur_style()->border_bottom_color);
                     draw_y += 2;
@@ -1077,18 +1175,12 @@ void browser_render(void) {
             continue;
         }
 
-        /* Skip content inside <style> */
         if (in_style_tag) { pos++; continue; }
-
-        /* Skip if display:none */
         if (cur_style()->display_none) { pos++; continue; }
 
         char c = page_buf[pos++];
-
-        /* Treat newlines/tabs as spaces (HTML whitespace) */
         if (c == '\n' || c == '\r' || c == '\t') c = ' ';
 
-        /* Whitespace collapsing: skip consecutive spaces and leading spaces */
         if (c == ' ') {
             if (last_was_space || line_start) continue;
             last_was_space = true;
@@ -1096,13 +1188,11 @@ void browser_render(void) {
             last_was_space = false;
         }
 
-        /* Determine text color from style stack */
         struct render_style *st = cur_style();
         color_t fg;
         if (in_link) {
             fg = C_LINK;
         } else if (st->color != C_TEXT || heading || st->bold || st->italic) {
-            /* Explicit CSS color takes priority */
             if (st->color != C_TEXT) {
                 fg = st->color;
             } else if (heading == 1) {
@@ -1122,12 +1212,9 @@ void browser_render(void) {
             fg = st->color;
         }
 
-        /* Word-boundary wrapping */
         if (c == ' ') {
-            /* At a space: check if the next word fits on this line */
-            int ww = measure_word(pos);
+            int ww = measure_word(page_buf, page_len, pos);
             if (ww > 0 && draw_x + 8 + ww > max_x) {
-                /* Next word doesn't fit — wrap now, skip the space */
                 draw_y += 16;
                 draw_x = (in_list ? 24 : 8) + st->padding_left;
                 line_start = true;
@@ -1136,17 +1223,15 @@ void browser_render(void) {
             }
         }
 
-        /* Character-level wrap fallback (for very long words) */
         if (draw_x + 8 > max_x) {
             draw_y += 16;
             draw_x = (in_list ? 24 : 8) + st->padding_left;
             line_start = true;
         }
 
-        /* Text alignment: adjust draw_x at start of each line */
         if (line_start && (st->text_center || st->text_right)) {
             int base_x = draw_x;
-            int lw = measure_line_width(pos - 1, base_x, max_x);
+            int lw = measure_line_width(page_buf, page_len, pos - 1, base_x, max_x);
             if (st->text_center)
                 draw_x = base_x + (max_x - base_x - lw) / 2;
             else if (st->text_right)
@@ -1155,18 +1240,15 @@ void browser_render(void) {
         }
         line_start = false;
 
-        /* Bullet */
         if (at_li_start) {
-            int bullet_sy = CONTENT_Y + draw_y - scroll_y;
+            int bullet_sy = CONTENT_Y + draw_y - T->scroll_y;
             if (bullet_sy >= CONTENT_Y && bullet_sy + 16 <= CONTENT_Y + CONTENT_H)
                 brw_rect(buf, cw, ch, draw_x - 12, bullet_sy + 6, 4, 4, C_BULLET);
             at_li_start = false;
         }
 
-        /* Draw character if visible */
-        int screen_y = CONTENT_Y + draw_y - scroll_y;
+        int screen_y = CONTENT_Y + draw_y - T->scroll_y;
         if (screen_y >= CONTENT_Y && screen_y + 16 <= CONTENT_Y + CONTENT_H) {
-            /* Draw background if set */
             if (st->bg_color != C_NONE)
                 brw_rect(buf, cw, ch, draw_x, screen_y, 8, 16, st->bg_color);
 
@@ -1179,12 +1261,12 @@ void browser_render(void) {
     }
 
     /* Scroll clamping */
-    content_total_h = draw_y + 20;
-    if (scroll_y > content_total_h - CONTENT_H) {
-        if (content_total_h > CONTENT_H)
-            scroll_y = content_total_h - CONTENT_H;
+    T->content_total_h = draw_y + 20;
+    if (T->scroll_y > T->content_total_h - CONTENT_H) {
+        if (T->content_total_h > CONTENT_H)
+            T->scroll_y = T->content_total_h - CONTENT_H;
         else
-            scroll_y = 0;
+            T->scroll_y = 0;
     }
 
     /* Status bar */
@@ -1192,11 +1274,11 @@ void browser_render(void) {
     brw_text(buf, cw, ch, 4, BRW_H - STATUS_H + 1, status_msg, C_STATUS_FG, C_STATUS_BG);
 
     /* Scrollbar */
-    if (content_total_h > CONTENT_H) {
+    if (T->content_total_h > CONTENT_H) {
         int track_h = CONTENT_H - 4;
-        int thumb_h = (CONTENT_H * track_h) / content_total_h;
+        int thumb_h = (CONTENT_H * track_h) / T->content_total_h;
         if (thumb_h < 10) thumb_h = 10;
-        int thumb_y = CONTENT_Y + 2 + (scroll_y * (track_h - thumb_h)) / (content_total_h - CONTENT_H);
+        int thumb_y = CONTENT_Y + 2 + (T->scroll_y * (track_h - thumb_h)) / (T->content_total_h - CONTENT_H);
         brw_rect(buf, cw, ch, BRW_W - 6, CONTENT_Y + 2, 4, track_h, COLOR_RGB(210, 210, 215));
         brw_rect(buf, cw, ch, BRW_W - 6, thumb_y, 4, thumb_h, COLOR_RGB(160, 160, 170));
     }
