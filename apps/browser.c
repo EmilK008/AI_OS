@@ -218,6 +218,7 @@ struct css_rule {
     int margin_top, margin_bottom, padding_left;
     bool has_margin_top, has_margin_bottom, has_padding_left;
     bool text_center;
+    bool text_right;
     bool has_text_align;
     bool display_none;
     bool has_display;
@@ -238,6 +239,7 @@ struct render_style {
     bool underline;
     int padding_left;
     bool text_center;
+    bool text_right;
     bool display_none;
     bool has_border_bottom;
     color_t border_bottom_color;
@@ -314,6 +316,7 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
             st->underline = ci_eq(val, "underline");
         } else if (ci_eq(prop, "text-align")) {
             st->text_center = ci_eq(val, "center");
+            st->text_right = ci_eq(val, "right");
         } else if (ci_eq(prop, "font-weight")) {
             st->bold = ci_eq(val, "bold") || ci_eq(val, "700") || ci_eq(val, "800") || ci_eq(val, "900");
         } else if (ci_eq(prop, "font-style")) {
@@ -360,7 +363,7 @@ static void apply_rule(struct css_rule *r, struct render_style *st) {
     if (r->has_margin_top) st->margin_top = r->margin_top;
     if (r->has_margin_bottom) st->margin_bottom = r->margin_bottom;
     if (r->has_padding_left) st->padding_left = r->padding_left;
-    if (r->has_text_align) st->text_center = r->text_center;
+    if (r->has_text_align) { st->text_center = r->text_center; st->text_right = r->text_right; }
     if (r->has_display) st->display_none = r->display_none;
     if (r->has_border_bottom) {
         st->has_border_bottom = true;
@@ -388,7 +391,11 @@ static void parse_css_rule_body(const char *body, int blen, struct css_rule *rul
     if (tmp.margin_top) { rule->margin_top = tmp.margin_top; rule->has_margin_top = true; }
     if (tmp.margin_bottom) { rule->margin_bottom = tmp.margin_bottom; rule->has_margin_bottom = true; }
     if (tmp.padding_left) { rule->padding_left = tmp.padding_left; rule->has_padding_left = true; }
-    if (tmp.text_center) { rule->text_center = true; rule->has_text_align = true; }
+    if (tmp.text_center || tmp.text_right) {
+        rule->text_center = tmp.text_center;
+        rule->text_right = tmp.text_right;
+        rule->has_text_align = true;
+    }
     if (tmp.display_none) { rule->display_none = true; rule->has_display = true; }
     if (tmp.has_border_bottom) { rule->has_border_bottom = true; rule->border_bottom_color = tmp.border_bottom_color; }
 }
@@ -785,6 +792,63 @@ bool browser_is_alive(void) {
     return (w && w->alive);
 }
 
+/* Measure the width (in pixels) of the next word starting at page_buf[pos].
+ * A "word" is a run of non-space, non-tag characters.
+ * Returns width in pixels (chars * 8). */
+static int measure_word(int pos) {
+    int chars = 0;
+    while (pos < page_len) {
+        char c = page_buf[pos];
+        if (c == '<' || c == ' ' || c == '\t' || c == '\n' || c == '\r') break;
+        chars++;
+        pos++;
+    }
+    return chars * 8;
+}
+
+/* Measure the width of text from pos until the next line break.
+ * Line breaks occur at: block tags, <br>, line wrap, or end of content.
+ * This accounts for word wrapping at max_w. */
+static int measure_line_width(int pos, int start_x, int max_w) {
+    int x = start_x;
+    while (pos < page_len) {
+        char c = page_buf[pos];
+        if (c == '<') {
+            /* Check if this tag causes a line break */
+            int tp = pos + 1;
+            if (tp < page_len && page_buf[tp] == '/') tp++;
+            char tn[16];
+            int ti = 0;
+            while (tp < page_len && page_buf[tp] != '>' && page_buf[tp] != ' ' && ti < 15)
+                tn[ti++] = to_lower(page_buf[tp++]);
+            tn[ti] = '\0';
+            /* Block-level tags cause line breaks */
+            if (ti > 0 && (
+                tag_eq(tn, ti, "p") || tag_eq(tn, ti, "div") || tag_eq(tn, ti, "br") ||
+                tag_eq(tn, ti, "h1") || tag_eq(tn, ti, "h2") || tag_eq(tn, ti, "h3") ||
+                tag_eq(tn, ti, "h4") || tag_eq(tn, ti, "h5") || tag_eq(tn, ti, "h6") ||
+                tag_eq(tn, ti, "li") || tag_eq(tn, ti, "hr") || tag_eq(tn, ti, "ul") ||
+                tag_eq(tn, ti, "ol") || tag_eq(tn, ti, "tr") ||
+                tag_eq(tn, ti, "blockquote")))
+                break;
+            /* Skip past this inline tag */
+            while (pos < page_len && page_buf[pos] != '>') pos++;
+            if (pos < page_len) pos++;
+            continue;
+        }
+        if (c == '\n' || c == '\r') { pos++; continue; }
+        /* Would this character cause a word-wrap? */
+        if (c == ' ') {
+            int ww = measure_word(pos + 1);
+            if (ww > 0 && x + 8 + ww > max_w) break; /* next word won't fit */
+        }
+        if (x + 8 > max_w) break; /* character wrap */
+        x += 8;
+        pos++;
+    }
+    return x - start_x;
+}
+
 void browser_render(void) {
     if (win_id < 0) return;
     struct window *win = wm_get_window(win_id);
@@ -838,6 +902,8 @@ void browser_render(void) {
     bool in_list = false;
     bool at_li_start = false;
     bool in_style_tag = false;  /* skip content inside <style>...</style> */
+    bool last_was_space = true; /* for whitespace collapsing; start true to skip leading spaces */
+    bool line_start = true;     /* at start of a new line (for alignment) */
     char current_href[ADDR_MAX + 1];
     int link_start_x = 0, link_start_y = 0;
     current_href[0] = '\0';
@@ -899,25 +965,31 @@ void browser_render(void) {
 
             /* Tag-specific layout */
             if (!hidden) {
+                bool is_block = false;
                 if (tag_eq(tag_name, tn, "h1")) {
                     if (!closing) { heading = 1; draw_y += 8; draw_x = 8 + cur_style()->padding_left; }
                     else { heading = 0; draw_y += 20; draw_x = 8; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "h2")) {
                     if (!closing) { heading = 2; draw_y += 6; draw_x = 8 + cur_style()->padding_left; }
                     else { heading = 0; draw_y += 18; draw_x = 8; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "h3") || tag_eq(tag_name, tn, "h4") ||
                            tag_eq(tag_name, tn, "h5") || tag_eq(tag_name, tn, "h6")) {
                     if (!closing) { heading = 3; draw_y += 4; draw_x = 8 + cur_style()->padding_left; }
                     else { heading = 0; draw_y += 16; draw_x = 8; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "p") || tag_eq(tag_name, tn, "div") ||
                            tag_eq(tag_name, tn, "article") || tag_eq(tag_name, tn, "section") ||
                            tag_eq(tag_name, tn, "aside") || tag_eq(tag_name, tn, "footer") ||
                            tag_eq(tag_name, tn, "header") || tag_eq(tag_name, tn, "nav")) {
                     if (!closing) { draw_y += 6; draw_x = 8 + cur_style()->padding_left; }
                     else { draw_y += 8; draw_x = 8; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "blockquote")) {
                     if (!closing) { draw_y += 4; draw_x = 32 + cur_style()->padding_left; }
                     else { draw_y += 4; draw_x = 8; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "pre") || tag_eq(tag_name, tn, "code")) {
                     if (!closing) { cur_style()->bold = true; }
                 } else if (tag_eq(tag_name, tn, "b") || tag_eq(tag_name, tn, "strong")) {
@@ -932,6 +1004,7 @@ void browser_render(void) {
                 } else if (tag_eq(tag_name, tn, "br")) {
                     draw_y += 16;
                     draw_x = 8 + cur_style()->padding_left;
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "hr")) {
                     draw_y += 4;
                     int rule_y = CONTENT_Y + draw_y - scroll_y;
@@ -939,6 +1012,7 @@ void browser_render(void) {
                         brw_rect(buf, cw, ch, 8, rule_y, BRW_W - 16, 1, C_HR);
                     draw_y += 8;
                     draw_x = 8;
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "a")) {
                     if (!closing) {
                         in_link = true;
@@ -961,6 +1035,7 @@ void browser_render(void) {
                            tag_eq(tag_name, tn, "dl")) {
                     if (!closing) { in_list = true; draw_y += 4; }
                     else { in_list = false; draw_y += 4; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "li") || tag_eq(tag_name, tn, "dd")) {
                     if (!closing) {
                         draw_y += 2;
@@ -969,15 +1044,23 @@ void browser_render(void) {
                     } else {
                         draw_y += 16; draw_x = 8;
                     }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "dt")) {
                     if (!closing) { draw_y += 2; draw_x = (in_list ? 16 : 8); cur_style()->bold = true; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "table") || tag_eq(tag_name, tn, "thead") ||
                            tag_eq(tag_name, tn, "tbody")) {
                     if (!closing) { draw_y += 4; draw_x = 8; } else { draw_y += 4; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "tr")) {
                     if (!closing) { draw_x = 8; } else { draw_y += 16; draw_x = 8; }
+                    is_block = true;
                 } else if (tag_eq(tag_name, tn, "td") || tag_eq(tag_name, tn, "th")) {
                     if (!closing) draw_x += 8; else draw_x += 16;
+                }
+                if (is_block) {
+                    last_was_space = true;
+                    line_start = true;
                 }
             }
 
@@ -1002,7 +1085,17 @@ void browser_render(void) {
         if (cur_style()->display_none) { pos++; continue; }
 
         char c = page_buf[pos++];
-        if ((c == '\n' || c == '\r') && pos < page_len) continue;
+
+        /* Treat newlines/tabs as spaces (HTML whitespace) */
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+
+        /* Whitespace collapsing: skip consecutive spaces and leading spaces */
+        if (c == ' ') {
+            if (last_was_space || line_start) continue;
+            last_was_space = true;
+        } else {
+            last_was_space = false;
+        }
 
         /* Determine text color from style stack */
         struct render_style *st = cur_style();
@@ -1030,11 +1123,38 @@ void browser_render(void) {
             fg = st->color;
         }
 
-        /* Word wrap */
+        /* Word-boundary wrapping */
+        if (c == ' ') {
+            /* At a space: check if the next word fits on this line */
+            int ww = measure_word(pos);
+            if (ww > 0 && draw_x + 8 + ww > max_x) {
+                /* Next word doesn't fit — wrap now, skip the space */
+                draw_y += 16;
+                draw_x = (in_list ? 24 : 8) + st->padding_left;
+                line_start = true;
+                last_was_space = true;
+                continue;
+            }
+        }
+
+        /* Character-level wrap fallback (for very long words) */
         if (draw_x + 8 > max_x) {
             draw_y += 16;
             draw_x = (in_list ? 24 : 8) + st->padding_left;
+            line_start = true;
         }
+
+        /* Text alignment: adjust draw_x at start of each line */
+        if (line_start && (st->text_center || st->text_right)) {
+            int base_x = draw_x;
+            int lw = measure_line_width(pos - 1, base_x, max_x);
+            if (st->text_center)
+                draw_x = base_x + (max_x - base_x - lw) / 2;
+            else if (st->text_right)
+                draw_x = max_x - lw;
+            if (draw_x < base_x) draw_x = base_x;
+        }
+        line_start = false;
 
         /* Bullet */
         if (at_li_start) {
