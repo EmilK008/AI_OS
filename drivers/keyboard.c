@@ -134,6 +134,8 @@ void keyboard_handler(void) {
                 else if (c == 'n' || c == 'N') c = 14;  /* SO - Ctrl+N */
                 else if (c == 's' || c == 'S') c = 19;  /* Ctrl+S */
                 else if (c == 'q' || c == 'Q') c = 17;  /* Ctrl+Q */
+                else if (c == 't' || c == 'T') c = 20;  /* DC4 - Ctrl+T */
+                else if (c == 'w' || c == 'W') c = 23;  /* ETB - Ctrl+W */
                 else if (c == 'z' || c == 'Z') c = 26;  /* SUB - Ctrl+Z */
                 else if (c == 'y' || c == 'Y') c = 25;  /* EM  - Ctrl+Y */
                 else if (c == 'r' || c == 'R') c = 18;  /* DC2 - Ctrl+R */

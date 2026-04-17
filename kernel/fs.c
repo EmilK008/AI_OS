@@ -112,7 +112,8 @@ void fs_init_defaults(void) {
             "<hr>"
             "<!-- Links to other local files -->"
             "<p>Links: <a href=\"readme.txt\">readme.txt</a> | "
-            "<a href=\"demo.htm\">demo page</a></p>"
+            "<a href=\"demo.htm\">demo page</a> | "
+            "<a href=\"features.htm\">features demo</a></p>"
             "<!-- Navigation hints -->"
             "<p>Scroll: PgUp/PgDn | Back: Backspace</p>"
             "<p>Tabs: Ctrl+T new | Ctrl+W close</p>";
@@ -145,6 +146,66 @@ void fs_init_defaults(void) {
             "<!-- Navigation link back to home -->"
             "<p>Go <a href=\"home.htm\">back to home</a></p>";
         fs_write_file(demo, htm, str_len(htm));
+    }
+
+    /* Create browser features demo page */
+    int features = fs_create("features.htm", FS_FILE);
+    if (features >= 0) {
+        const char *htm =
+            "<style>"
+            "h1 { color: steelblue; text-align: center; }"
+            "h2 { color: crimson; border-bottom: 2px solid crimson; }"
+            ".box { border: 2px solid navy; margin: 8; padding: 8; }"
+            ".info { background: khaki; padding: 6; margin-bottom: 8; }"
+            "pre { background: lightgray; padding: 8; white-space: pre; }"
+            ".small { font-size: 10; color: gray; }"
+            ".spaced { letter-spacing: 4; }"
+            "ul.nodots { list-style: none; }"
+            "</style>"
+            "<h1>Browser Features Demo</h1>"
+            /* HTML Entities */
+            "<h2>HTML Entities</h2>"
+            "<p>&lt;html&gt; &amp; &quot;quotes&quot; &apos;apos&apos;</p>"
+            "<p>Numeric: &#65;&#66;&#67; (ABC) | Hex: &#x48;&#x49; (HI)</p>"
+            "<p>Non-breaking&nbsp;&nbsp;&nbsp;spaces&nbsp;&nbsp;&nbsp;here</p>"
+            /* CSS: border, margin, padding */
+            "<h2>CSS: Borders &amp; Spacing</h2>"
+            "<div class=\"box\">This div has a 2px navy border "
+            "with margin and padding.</div>"
+            "<div class=\"info\">Khaki background with padding</div>"
+            /* CSS: white-space pre */
+            "<h2>White-Space: Pre</h2>"
+            "<pre>Line 1\n  indented\n    more\nback</pre>"
+            /* CSS: letter-spacing */
+            "<h2>Letter Spacing</h2>"
+            "<p class=\"spaced\">W I D E text with letter-spacing</p>"
+            /* CSS: list-style */
+            "<h2>List Styles</h2>"
+            "<p>No bullets:</p>"
+            "<ul class=\"nodots\"><li>Clean item 1</li>"
+            "<li>Clean item 2</li></ul>"
+            /* Forms */
+            "<h2>Form Elements</h2>"
+            "<form>"
+            "<p>Text: <input type=\"text\" placeholder=\"Type here\"></p>"
+            "<p>Pass: <input type=\"password\" value=\"secret\"></p>"
+            "<p>Check: <input type=\"checkbox\"> Enable option</p>"
+            "<p>Select: <select>"
+            "<option>Option A</option>"
+            "<option>Option B</option>"
+            "<option>Option C</option>"
+            "</select></p>"
+            "<p><button>Click Me</button></p>"
+            "<p>Textarea:</p>"
+            "<textarea>Edit this text...</textarea>"
+            "</form>"
+            /* Navigation */
+            "<hr>"
+            "<p><a href=\"home.htm\">Home</a> | "
+            "<a href=\"demo.htm\">CSS Demo</a></p>"
+            "<p class=\"small\">Use Tab to cycle form fields. "
+            "Click to focus. Esc to unfocus.</p>";
+        fs_write_file(features, htm, str_len(htm));
     }
 }
 

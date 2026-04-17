@@ -20,7 +20,7 @@
 #define CONTENT_H   (BRW_H - TOOLBAR_H - TAB_BAR_H - STATUS_H)
 
 /* Address bar */
-#define ADDR_X      40
+#define ADDR_X      74
 #define ADDR_W      (BRW_W - ADDR_X - 40)
 #define ADDR_MAX    30
 
@@ -59,6 +59,36 @@
 struct link_region {
     int x, y, w, h;
     char href[ADDR_MAX + 1];
+};
+
+/* ===========================================================================
+ * Form Elements
+ * =========================================================================== */
+
+#define MAX_FORM_FIELDS 16
+#define FORM_INPUT     0
+#define FORM_BUTTON    1
+#define FORM_TEXTAREA  2
+#define FORM_SELECT    3
+#define FORM_CHECKBOX  4
+#define FORM_PASSWORD  5
+
+#define FORM_VAL_MAX   64
+#define FORM_OPT_MAX   8
+
+struct form_field {
+    int type;
+    int x, y, w, h;            /* position/size in content coords */
+    char name[32];
+    char value[FORM_VAL_MAX];
+    int value_len;
+    int cursor;
+    bool checked;               /* for checkbox */
+    char placeholder[32];
+    char options[FORM_OPT_MAX][32]; /* for select */
+    int option_count;
+    int selected_option;
+    bool dropdown_open;
 };
 
 /* ===========================================================================
@@ -205,6 +235,26 @@ struct css_rule {
     bool has_display;
     bool has_border_bottom;
     color_t border_bottom_color;
+    /* Extended CSS properties */
+    int margin_left, margin_right;
+    bool has_margin_left, has_margin_right;
+    int padding_top, padding_bottom, padding_right;
+    bool has_padding_top, has_padding_bottom, has_padding_right;
+    bool has_border;
+    int border_width;
+    color_t border_color;
+    int width, max_width;
+    bool has_width, has_max_width;
+    int font_size;  /* 0=normal, 1=small, 2=large */
+    bool has_font_size;
+    int line_height, letter_spacing;
+    bool has_line_height, has_letter_spacing;
+    int list_style; /* 0=disc, 1=none, 2=circle, 3=square */
+    bool has_list_style;
+    bool white_space_pre;
+    bool has_white_space;
+    bool visibility_hidden;
+    bool has_visibility;
 };
 
 /* --- Render Style Stack --- */
@@ -224,6 +274,20 @@ struct render_style {
     color_t border_bottom_color;
     int margin_top;
     int margin_bottom;
+    /* Extended properties */
+    int margin_left, margin_right;
+    int padding_top, padding_bottom, padding_right;
+    bool has_border;
+    int border_width;
+    color_t border_color;
+    int width, max_width;
+    bool has_width, has_max_width;
+    int font_size;  /* 0=normal, 1=small, 2=large */
+    int line_height;
+    int letter_spacing;
+    int list_style; /* 0=disc, 1=none, 2=circle, 3=square */
+    bool white_space_pre;
+    bool visibility_hidden;
 };
 static struct render_style style_stack[STYLE_STACK_MAX];
 static int style_depth = 0;
@@ -304,8 +368,72 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
         } else if (ci_eq(prop, "padding-left")) {
             int v = 0; parse_int(val, 0, vi, &v);
             st->padding_left = v;
+        } else if (ci_eq(prop, "padding-top")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->padding_top = v;
+        } else if (ci_eq(prop, "padding-bottom")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->padding_bottom = v;
+        } else if (ci_eq(prop, "padding-right")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->padding_right = v;
+        } else if (ci_eq(prop, "padding")) {
+            /* Shorthand: 1-4 values */
+            int vals[4] = {0,0,0,0};
+            int vc = 0, vp = 0;
+            while (vp < vi && vc < 4) {
+                while (vp < vi && val[vp] == ' ') vp++;
+                int v = 0; int used = parse_int(val, vp, vi, &v);
+                if (used > 0) { vals[vc++] = v; vp += used; }
+                while (vp < vi && val[vp] != ' ') vp++;
+            }
+            if (vc == 1) { st->padding_top = st->padding_bottom = st->padding_left = st->padding_right = vals[0]; }
+            else if (vc == 2) { st->padding_top = st->padding_bottom = vals[0]; st->padding_left = st->padding_right = vals[1]; }
+            else if (vc == 3) { st->padding_top = vals[0]; st->padding_left = st->padding_right = vals[1]; st->padding_bottom = vals[2]; }
+            else if (vc == 4) { st->padding_top = vals[0]; st->padding_right = vals[1]; st->padding_bottom = vals[2]; st->padding_left = vals[3]; }
+        } else if (ci_eq(prop, "margin-left")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->margin_left = v;
+        } else if (ci_eq(prop, "margin-right")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->margin_right = v;
+        } else if (ci_eq(prop, "margin")) {
+            /* Shorthand: 1-4 values */
+            int vals[4] = {0,0,0,0};
+            int vc = 0, vp = 0;
+            while (vp < vi && vc < 4) {
+                while (vp < vi && val[vp] == ' ') vp++;
+                int v = 0; int used = parse_int(val, vp, vi, &v);
+                if (used > 0) { vals[vc++] = v; vp += used; }
+                while (vp < vi && val[vp] != ' ') vp++;
+            }
+            if (vc == 1) { st->margin_top = st->margin_bottom = st->margin_left = st->margin_right = vals[0]; }
+            else if (vc == 2) { st->margin_top = st->margin_bottom = vals[0]; st->margin_left = st->margin_right = vals[1]; }
+            else if (vc == 3) { st->margin_top = vals[0]; st->margin_left = st->margin_right = vals[1]; st->margin_bottom = vals[2]; }
+            else if (vc == 4) { st->margin_top = vals[0]; st->margin_right = vals[1]; st->margin_bottom = vals[2]; st->margin_left = vals[3]; }
         } else if (ci_eq(prop, "display")) {
             st->display_none = ci_eq(val, "none");
+        } else if (ci_eq(prop, "border")) {
+            /* Shorthand: Npx solid COLOR */
+            int bw = 1;
+            parse_int(val, 0, vi, &bw);
+            if (bw < 1) bw = 1;
+            st->has_border = true;
+            st->border_width = bw;
+            color_t bc = C_NONE;
+            for (int i = 0; i < vi; i++) {
+                if (i == 0 || val[i - 1] == ' ') {
+                    bc = parse_color(val + i);
+                    if (bc != C_NONE) break;
+                }
+            }
+            st->border_color = (bc != C_NONE) ? bc : C_HR;
+        } else if (ci_eq(prop, "border-color")) {
+            color_t c = parse_color(val);
+            if (c != C_NONE) { st->has_border = true; st->border_color = c; }
+        } else if (ci_eq(prop, "border-width")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            if (v > 0) { st->has_border = true; st->border_width = v; }
         } else if (ci_eq(prop, "border-bottom")) {
             st->has_border_bottom = true;
             char *tok = val;
@@ -318,6 +446,41 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
             }
             st->border_bottom_color = (bc != C_NONE) ? bc : C_HR;
             (void)tok;
+        } else if (ci_eq(prop, "width")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            if (v > 0) { st->has_width = true; st->width = v; }
+        } else if (ci_eq(prop, "max-width")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            if (v > 0) { st->has_max_width = true; st->max_width = v; }
+        } else if (ci_eq(prop, "font-size")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            if (v > 0) {
+                if (v < 12) st->font_size = 1;       /* small */
+                else if (v > 18) st->font_size = 2;  /* large */
+                else st->font_size = 0;               /* normal */
+            } else if (ci_eq(val, "small") || ci_eq(val, "x-small") || ci_eq(val, "xx-small")) {
+                st->font_size = 1;
+            } else if (ci_eq(val, "large") || ci_eq(val, "x-large") || ci_eq(val, "xx-large")) {
+                st->font_size = 2;
+            }
+        } else if (ci_eq(prop, "line-height")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            if (v > 0) st->line_height = v;
+        } else if (ci_eq(prop, "letter-spacing")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            st->letter_spacing = v;
+        } else if (ci_eq(prop, "list-style-type") || ci_eq(prop, "list-style")) {
+            if (ci_eq(val, "none")) st->list_style = 1;
+            else if (ci_eq(val, "circle")) st->list_style = 2;
+            else if (ci_eq(val, "square")) st->list_style = 3;
+            else st->list_style = 0; /* disc */
+        } else if (ci_eq(prop, "white-space")) {
+            st->white_space_pre = ci_eq(val, "pre") || ci_eq(val, "pre-wrap");
+        } else if (ci_eq(prop, "visibility")) {
+            st->visibility_hidden = ci_eq(val, "hidden");
+        } else if (ci_eq(prop, "opacity")) {
+            int v = 0; parse_int(val, 0, vi, &v);
+            if (v == 0 && val[0] == '0') st->visibility_hidden = true;
         }
     }
 }
@@ -330,13 +493,31 @@ static void apply_rule(struct css_rule *r, struct render_style *st) {
     if (r->has_underline) st->underline = r->underline;
     if (r->has_margin_top) st->margin_top = r->margin_top;
     if (r->has_margin_bottom) st->margin_bottom = r->margin_bottom;
+    if (r->has_margin_left) st->margin_left = r->margin_left;
+    if (r->has_margin_right) st->margin_right = r->margin_right;
     if (r->has_padding_left) st->padding_left = r->padding_left;
+    if (r->has_padding_top) st->padding_top = r->padding_top;
+    if (r->has_padding_bottom) st->padding_bottom = r->padding_bottom;
+    if (r->has_padding_right) st->padding_right = r->padding_right;
     if (r->has_text_align) { st->text_center = r->text_center; st->text_right = r->text_right; }
     if (r->has_display) st->display_none = r->display_none;
     if (r->has_border_bottom) {
         st->has_border_bottom = true;
         st->border_bottom_color = r->border_bottom_color;
     }
+    if (r->has_border) {
+        st->has_border = true;
+        st->border_width = r->border_width;
+        st->border_color = r->border_color;
+    }
+    if (r->has_width) { st->has_width = true; st->width = r->width; }
+    if (r->has_max_width) { st->has_max_width = true; st->max_width = r->max_width; }
+    if (r->has_font_size) st->font_size = r->font_size;
+    if (r->has_line_height) st->line_height = r->line_height;
+    if (r->has_letter_spacing) st->letter_spacing = r->letter_spacing;
+    if (r->has_list_style) st->list_style = r->list_style;
+    if (r->has_white_space) st->white_space_pre = r->white_space_pre;
+    if (r->has_visibility) st->visibility_hidden = r->visibility_hidden;
 }
 
 /* --- Parse <style> block into css_rules --- */
@@ -365,6 +546,21 @@ static void parse_css_rule_body(const char *body, int blen, struct css_rule *rul
     }
     if (tmp.display_none) { rule->display_none = true; rule->has_display = true; }
     if (tmp.has_border_bottom) { rule->has_border_bottom = true; rule->border_bottom_color = tmp.border_bottom_color; }
+    /* Extended properties */
+    if (tmp.margin_left) { rule->margin_left = tmp.margin_left; rule->has_margin_left = true; }
+    if (tmp.margin_right) { rule->margin_right = tmp.margin_right; rule->has_margin_right = true; }
+    if (tmp.padding_top) { rule->padding_top = tmp.padding_top; rule->has_padding_top = true; }
+    if (tmp.padding_bottom) { rule->padding_bottom = tmp.padding_bottom; rule->has_padding_bottom = true; }
+    if (tmp.padding_right) { rule->padding_right = tmp.padding_right; rule->has_padding_right = true; }
+    if (tmp.has_border) { rule->has_border = true; rule->border_width = tmp.border_width; rule->border_color = tmp.border_color; }
+    if (tmp.has_width) { rule->has_width = true; rule->width = tmp.width; }
+    if (tmp.has_max_width) { rule->has_max_width = true; rule->max_width = tmp.max_width; }
+    if (tmp.font_size) { rule->font_size = tmp.font_size; rule->has_font_size = true; }
+    if (tmp.line_height) { rule->line_height = tmp.line_height; rule->has_line_height = true; }
+    if (tmp.letter_spacing) { rule->letter_spacing = tmp.letter_spacing; rule->has_letter_spacing = true; }
+    if (tmp.list_style) { rule->list_style = tmp.list_style; rule->has_list_style = true; }
+    if (tmp.white_space_pre) { rule->white_space_pre = true; rule->has_white_space = true; }
+    if (tmp.visibility_hidden) { rule->visibility_hidden = true; rule->has_visibility = true; }
 }
 
 static void parse_style_block(const char *css, int css_len, struct css_rule *rules, int *rule_count) {
@@ -479,6 +675,55 @@ static void extract_attr(const char *tag, int tlen, const char *attr_name, char 
     }
 }
 
+/* --- HTML Entity Decoding --- */
+
+/* Decode an HTML entity starting at buf[pos] (which should be '&').
+ * Returns number of chars consumed (including '&' and ';'), or 0 if invalid.
+ * Decoded character written to *out_char. */
+static int decode_entity(const char *buf, int pos, int len, char *out_char, bool *out_nbsp) {
+    *out_nbsp = false;
+    if (pos >= len || buf[pos] != '&') return 0;
+    /* Find the ';' */
+    int end = pos + 1;
+    while (end < len && end < pos + 10 && buf[end] != ';' && buf[end] != ' ' && buf[end] != '<')
+        end++;
+    if (end >= len || buf[end] != ';') return 0;
+    int elen = end - pos - 1; /* length of entity name (between & and ;) */
+    const char *e = buf + pos + 1;
+
+    /* Numeric entities: &#NNN; or &#xHH; */
+    if (elen >= 2 && e[0] == '#') {
+        int val = 0;
+        if (e[1] == 'x' || e[1] == 'X') {
+            /* Hex */
+            for (int i = 2; i < elen; i++) {
+                int d = hex_digit(e[i]);
+                if (d < 0) return 0;
+                val = val * 16 + d;
+            }
+        } else {
+            /* Decimal */
+            for (int i = 1; i < elen; i++) {
+                if (e[i] < '0' || e[i] > '9') return 0;
+                val = val * 10 + (e[i] - '0');
+            }
+        }
+        if (val > 0 && val < 128) { *out_char = (char)val; return end - pos + 1; }
+        if (val == 160) { *out_char = ' '; *out_nbsp = true; return end - pos + 1; }
+        return 0;
+    }
+
+    /* Named entities */
+    if (elen == 2 && e[0] == 'l' && e[1] == 't') { *out_char = '<'; return end - pos + 1; }
+    if (elen == 2 && e[0] == 'g' && e[1] == 't') { *out_char = '>'; return end - pos + 1; }
+    if (elen == 3 && e[0] == 'a' && e[1] == 'm' && e[2] == 'p') { *out_char = '&'; return end - pos + 1; }
+    if (elen == 4 && e[0] == 'q' && e[1] == 'u' && e[2] == 'o' && e[3] == 't') { *out_char = '"'; return end - pos + 1; }
+    if (elen == 4 && e[0] == 'a' && e[1] == 'p' && e[2] == 'o' && e[3] == 's') { *out_char = '\''; return end - pos + 1; }
+    if (elen == 4 && e[0] == 'n' && e[1] == 'b' && e[2] == 's' && e[3] == 'p') { *out_char = ' '; *out_nbsp = true; return end - pos + 1; }
+
+    return 0;
+}
+
 /* Case-insensitive tag name compare */
 static bool tag_eq(const char *tag, int tlen, const char *name) {
     int nlen = str_len(name);
@@ -505,10 +750,15 @@ struct browser_tab {
     struct link_region links[MAX_LINKS];
     int link_count;
     int hovered_link;
+    struct form_field form_fields[MAX_FORM_FIELDS];
+    int form_field_count;
+    int focused_field;          /* -1 = no form field focused */
     struct css_rule css_rules[MAX_CSS_RULES];
     int css_rule_count;
     char history[HISTORY_MAX][ADDR_MAX + 1];
     int history_count;
+    char forward[HISTORY_MAX][ADDR_MAX + 1];
+    int forward_count;
     bool used;
 };
 
@@ -609,6 +859,7 @@ static void load_page(struct browser_tab *tab, const char *filename) {
         str_copy(tab->history[tab->history_count], tab->addr_buf);
         tab->history_count++;
     }
+    tab->forward_count = 0; /* New navigation clears forward history */
 
     int i = 0;
     while (filename[i] && i < ADDR_MAX) { tab->addr_buf[i] = filename[i]; i++; }
@@ -645,11 +896,18 @@ static void load_page(struct browser_tab *tab, const char *filename) {
     tab->scroll_y = 0;
     tab->link_count = 0;
     tab->hovered_link = -1;
+    tab->form_field_count = 0;
+    tab->focused_field = -1;
     str_copy(status_msg, "Ready");
 }
 
 static void navigate_back(struct browser_tab *tab) {
     if (tab->history_count <= 0) return;
+    /* Save current page to forward history */
+    if (tab->addr_len > 0 && tab->forward_count < HISTORY_MAX) {
+        str_copy(tab->forward[tab->forward_count], tab->addr_buf);
+        tab->forward_count++;
+    }
     tab->history_count--;
     int i = 0;
     const char *filename = tab->history[tab->history_count];
@@ -672,6 +930,42 @@ static void navigate_back(struct browser_tab *tab) {
     tab->scroll_y = 0;
     tab->link_count = 0;
     tab->hovered_link = -1;
+    tab->form_field_count = 0;
+    tab->focused_field = -1;
+    str_copy(status_msg, "Ready");
+}
+
+static void navigate_forward(struct browser_tab *tab) {
+    if (tab->forward_count <= 0) return;
+    /* Save current page to back history */
+    if (tab->addr_len > 0 && tab->history_count < HISTORY_MAX) {
+        str_copy(tab->history[tab->history_count], tab->addr_buf);
+        tab->history_count++;
+    }
+    tab->forward_count--;
+    int i = 0;
+    const char *filename = tab->forward[tab->forward_count];
+    while (filename[i] && i < ADDR_MAX) { tab->addr_buf[i] = filename[i]; i++; }
+    tab->addr_buf[i] = '\0';
+    tab->addr_len = i;
+
+    int idx = fs_find(filename);
+    if (idx >= 0) {
+        struct fs_node *f = fs_get_node(idx);
+        if (f && f->type == FS_FILE && f->data) {
+            int len = (int)f->size;
+            if (len > PAGE_BUF_SIZE - 1) len = PAGE_BUF_SIZE - 1;
+            mem_copy(tab->page_buf, f->data, (uint32_t)len);
+            tab->page_len = len;
+            tab->page_buf[tab->page_len] = '\0';
+        }
+    }
+    extract_and_parse_styles(tab);
+    tab->scroll_y = 0;
+    tab->link_count = 0;
+    tab->hovered_link = -1;
+    tab->form_field_count = 0;
+    tab->focused_field = -1;
     str_copy(status_msg, "Ready");
 }
 
@@ -737,6 +1031,69 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
             }
             return;
         }
+
+        /* Form field keyboard input */
+        if (T->focused_field >= 0 && T->focused_field < T->form_field_count) {
+            struct form_field *ff = &T->form_fields[T->focused_field];
+            if (k == 0x1B) { T->focused_field = -1; return; } /* Escape unfocuses */
+            if (k == '\t') {
+                /* Tab to next form field, or wrap to address bar */
+                int next = T->focused_field + 1;
+                if (next >= T->form_field_count) {
+                    T->focused_field = -1;
+                    addr_focused = true;
+                } else {
+                    T->focused_field = next;
+                }
+                return;
+            }
+            if (ff->type == FORM_CHECKBOX) {
+                if (k == ' ' || k == '\n') { ff->checked = !ff->checked; return; }
+            } else if (ff->type == FORM_SELECT) {
+                if (k == KEY_UP && ff->selected_option > 0) { ff->selected_option--; return; }
+                if (k == KEY_DOWN && ff->selected_option < ff->option_count - 1) { ff->selected_option++; return; }
+                if (k == ' ' || k == '\n') { ff->dropdown_open = !ff->dropdown_open; return; }
+            } else if (ff->type == FORM_INPUT || ff->type == FORM_PASSWORD || ff->type == FORM_TEXTAREA) {
+                if (k == '\b') {
+                    if (ff->cursor > 0) {
+                        for (int i = ff->cursor - 1; i < ff->value_len - 1; i++)
+                            ff->value[i] = ff->value[i + 1];
+                        ff->value_len--;
+                        ff->cursor--;
+                    }
+                    return;
+                }
+                if (k == KEY_LEFT && ff->cursor > 0) { ff->cursor--; return; }
+                if (k == KEY_RIGHT && ff->cursor < ff->value_len) { ff->cursor++; return; }
+                if (k == KEY_HOME) { ff->cursor = 0; return; }
+                if (k == KEY_END) { ff->cursor = ff->value_len; return; }
+                if (k == KEY_DELETE) {
+                    if (ff->cursor < ff->value_len) {
+                        for (int i = ff->cursor; i < ff->value_len - 1; i++)
+                            ff->value[i] = ff->value[i + 1];
+                        ff->value_len--;
+                    }
+                    return;
+                }
+                if (k == '\n' && ff->type == FORM_TEXTAREA) {
+                    /* Newline in textarea — don't handle for now, just unfocus */
+                    T->focused_field = -1;
+                    return;
+                }
+                if (k == '\n') { T->focused_field = -1; return; } /* Enter = unfocus input */
+                if (k >= 0x20 && k < 0x80 && ff->value_len < FORM_VAL_MAX - 1) {
+                    /* Insert char at cursor */
+                    for (int i = ff->value_len; i > ff->cursor; i--)
+                        ff->value[i] = ff->value[i - 1];
+                    ff->value[ff->cursor] = (char)k;
+                    ff->value_len++;
+                    ff->cursor++;
+                    return;
+                }
+            }
+            return;
+        }
+
         if (k == KEY_UP)   { T->scroll_y -= 16; if (T->scroll_y < 0) T->scroll_y = 0; return; }
         if (k == KEY_DOWN) { T->scroll_y += 16; return; }
         if (k == KEY_PGUP) { T->scroll_y -= CONTENT_H; if (T->scroll_y < 0) T->scroll_y = 0; return; }
@@ -744,7 +1101,15 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
         if (k == KEY_HOME) { T->scroll_y = 0; return; }
         if (k == KEY_END)  { T->scroll_y = T->content_total_h - CONTENT_H; if (T->scroll_y < 0) T->scroll_y = 0; return; }
         if (k == '\b') { navigate_back(T); return; }
-        if (k == '\t') { addr_focused = true; return; }
+        if (k == '\t') {
+            /* Tab cycles: scrolling -> form fields -> address bar */
+            if (T->form_field_count > 0) {
+                T->focused_field = 0;
+            } else {
+                addr_focused = true;
+            }
+            return;
+        }
         if (k == 12) { addr_focused = true; T->addr_len = 0; return; }
         return;
     }
@@ -755,6 +1120,8 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
 
         /* Toolbar: back button */
         if (mx >= 4 && mx < 34 && my >= 4 && my < 22) { navigate_back(T); return; }
+        /* Toolbar: forward button */
+        if (mx >= 38 && mx < 68 && my >= 4 && my < 22) { navigate_forward(T); return; }
         /* Toolbar: Go button */
         if (mx >= BRW_W - 36 && mx < BRW_W - 4 && my >= 4 && my < 22) {
             if (T->addr_len > 0) {
@@ -796,10 +1163,45 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
             return;
         }
 
-        /* Content area: link clicks */
+        /* Content area: link clicks and form field clicks */
         if (my >= CONTENT_Y && my < CONTENT_Y + CONTENT_H) {
             int content_mx = mx;
             int content_my = my - CONTENT_Y + T->scroll_y;
+
+            /* Check form fields first */
+            T->focused_field = -1;
+            for (int i = 0; i < T->form_field_count; i++) {
+                struct form_field *ff = &T->form_fields[i];
+                if (content_mx >= ff->x && content_mx < ff->x + ff->w &&
+                    content_my >= ff->y && content_my < ff->y + ff->h) {
+                    T->focused_field = i;
+                    addr_focused = false;
+                    if (ff->type == FORM_CHECKBOX) {
+                        ff->checked = !ff->checked;
+                    } else if (ff->type == FORM_SELECT) {
+                        if (ff->dropdown_open) {
+                            /* Click on dropdown option */
+                            int opt_y = ff->y + ff->h;
+                            int opt_idx = (content_my - opt_y) / 16;
+                            if (opt_idx >= 0 && opt_idx < ff->option_count) {
+                                ff->selected_option = opt_idx;
+                            }
+                            ff->dropdown_open = false;
+                        } else {
+                            ff->dropdown_open = true;
+                        }
+                    } else if (ff->type == FORM_INPUT || ff->type == FORM_PASSWORD) {
+                        /* Place cursor based on click position */
+                        int rel_x = content_mx - ff->x - 4;
+                        ff->cursor = rel_x / 8;
+                        if (ff->cursor < 0) ff->cursor = 0;
+                        if (ff->cursor > ff->value_len) ff->cursor = ff->value_len;
+                    }
+                    return;
+                }
+            }
+
+            /* Check links */
             for (int i = 0; i < T->link_count; i++) {
                 if (content_mx >= T->links[i].x && content_mx < T->links[i].x + T->links[i].w &&
                     content_my >= T->links[i].y && content_my < T->links[i].y + T->links[i].h) {
@@ -914,8 +1316,12 @@ void browser_render(void) {
 
     /* Toolbar */
     brw_rect(buf, cw, ch, 0, 0, cw, TOOLBAR_H, C_TOOLBAR);
+    /* Back button */
     brw_rect(buf, cw, ch, 4, 4, 30, 18, C_BTN_BG);
     brw_text(buf, cw, ch, 8, 5, "<-", C_BTN_FG, C_BTN_BG);
+    /* Forward button */
+    brw_rect(buf, cw, ch, 38, 4, 30, 18, C_BTN_BG);
+    brw_text(buf, cw, ch, 42, 5, "->", C_BTN_FG, C_BTN_BG);
     brw_rect(buf, cw, ch, ADDR_X, 4, ADDR_W, 18, C_ADDR_BG);
     brw_rect(buf, cw, ch, ADDR_X, 4, ADDR_W, 1, COLOR_RGB(180, 180, 180));
     brw_rect(buf, cw, ch, ADDR_X, 21, ADDR_W, 1, COLOR_RGB(180, 180, 180));
@@ -979,6 +1385,13 @@ void browser_render(void) {
 
     /* ---- Render HTML content with CSS ---- */
     T->link_count = 0;
+    /* Save form field user data before re-rendering */
+    static struct form_field saved_fields[MAX_FORM_FIELDS];
+    int saved_field_count = T->form_field_count;
+    if (saved_field_count > MAX_FORM_FIELDS) saved_field_count = MAX_FORM_FIELDS;
+    for (int fi = 0; fi < saved_field_count; fi++)
+        saved_fields[fi] = T->form_fields[fi];
+    T->form_field_count = 0;
     char *page_buf = T->page_buf;
     int page_len = T->page_len;
 
@@ -1154,9 +1567,387 @@ void browser_render(void) {
                     is_block = true;
                 } else if (tag_eq(tag_name, tn, "td") || tag_eq(tag_name, tn, "th")) {
                     if (!closing) draw_x += 8; else draw_x += 16;
+                } else if (tag_eq(tag_name, tn, "input") && !closing) {
+                    /* Self-closing: create form field */
+                    if (T->form_field_count < MAX_FORM_FIELDS) {
+                        struct form_field *ff = &T->form_fields[T->form_field_count];
+                        mem_set(ff, 0, sizeof(*ff));
+                        /* Restore user data from previous frame */
+                        if (T->form_field_count < saved_field_count) {
+                            struct form_field *sf = &saved_fields[T->form_field_count];
+                            mem_copy(ff->value, sf->value, FORM_VAL_MAX);
+                            ff->value_len = sf->value_len;
+                            ff->cursor = sf->cursor;
+                            ff->checked = sf->checked;
+                            ff->selected_option = sf->selected_option;
+                            ff->dropdown_open = sf->dropdown_open;
+                        }
+                        char type_val[16];
+                        extract_attr(tag_full, tf, "type", type_val, 16);
+                        extract_attr(tag_full, tf, "name", ff->name, 32);
+                        if (T->form_field_count >= saved_field_count) {
+                            /* First time: read value from HTML */
+                            extract_attr(tag_full, tf, "value", ff->value, FORM_VAL_MAX);
+                            ff->value_len = str_len(ff->value);
+                        }
+                        extract_attr(tag_full, tf, "placeholder", ff->placeholder, 32);
+                        if (ci_eq(type_val, "checkbox")) {
+                            ff->type = FORM_CHECKBOX;
+                            if (T->form_field_count >= saved_field_count) {
+                                char chk[8];
+                                extract_attr(tag_full, tf, "checked", chk, 8);
+                                ff->checked = (chk[0] != '\0');
+                            }
+                            ff->x = draw_x; ff->y = draw_y;
+                            ff->w = 16; ff->h = 16;
+                            /* Render checkbox */
+                            int sy = CONTENT_Y + draw_y - T->scroll_y;
+                            if (sy >= CONTENT_Y && sy + 16 <= CONTENT_Y + CONTENT_H) {
+                                bool focused = (T->focused_field == T->form_field_count);
+                                color_t box_bg = COLOR_WHITE;
+                                color_t box_border = focused ? COLOR_RGB(0, 80, 200) : COLOR_RGB(150, 150, 150);
+                                brw_rect(buf, cw, ch, draw_x, sy, 14, 14, box_bg);
+                                brw_rect(buf, cw, ch, draw_x, sy, 14, 1, box_border);
+                                brw_rect(buf, cw, ch, draw_x, sy + 13, 14, 1, box_border);
+                                brw_rect(buf, cw, ch, draw_x, sy, 1, 14, box_border);
+                                brw_rect(buf, cw, ch, draw_x + 13, sy, 1, 14, box_border);
+                                if (ff->checked) {
+                                    brw_char_transparent(buf, cw, ch, draw_x + 3, sy - 1, 'X', COLOR_RGB(0, 120, 0));
+                                }
+                            }
+                            draw_x += 18;
+                            T->form_field_count++;
+                        } else if (ci_eq(type_val, "password")) {
+                            ff->type = FORM_PASSWORD;
+                            ff->cursor = ff->value_len;
+                            int fw = 160;
+                            ff->x = draw_x; ff->y = draw_y;
+                            ff->w = fw; ff->h = 18;
+                            int sy = CONTENT_Y + draw_y - T->scroll_y;
+                            if (sy >= CONTENT_Y && sy + 18 <= CONTENT_Y + CONTENT_H) {
+                                bool focused = (T->focused_field == T->form_field_count);
+                                color_t bdr = focused ? COLOR_RGB(0, 80, 200) : COLOR_RGB(180, 180, 180);
+                                brw_rect(buf, cw, ch, draw_x, sy, fw, 18, COLOR_WHITE);
+                                brw_rect(buf, cw, ch, draw_x, sy, fw, 1, bdr);
+                                brw_rect(buf, cw, ch, draw_x, sy + 17, fw, 1, bdr);
+                                brw_rect(buf, cw, ch, draw_x, sy, 1, 18, bdr);
+                                brw_rect(buf, cw, ch, draw_x + fw - 1, sy, 1, 18, bdr);
+                                /* Draw asterisks */
+                                int tx = draw_x + 4;
+                                for (int ci2 = 0; ci2 < ff->value_len && tx + 8 < draw_x + fw - 4; ci2++) {
+                                    brw_char_transparent(buf, cw, ch, tx, sy + 1, '*', C_ADDR_FG);
+                                    tx += 8;
+                                }
+                                if (focused && (timer_get_ticks() / 40) & 1) {
+                                    brw_rect(buf, cw, ch, draw_x + 4 + ff->cursor * 8, sy + 2, 2, 14, COLOR_RGB(0, 80, 200));
+                                }
+                            }
+                            draw_x += fw + 4;
+                            T->form_field_count++;
+                        } else {
+                            /* Default: text input */
+                            ff->type = FORM_INPUT;
+                            ff->cursor = ff->value_len;
+                            int fw = 160;
+                            ff->x = draw_x; ff->y = draw_y;
+                            ff->w = fw; ff->h = 18;
+                            int sy = CONTENT_Y + draw_y - T->scroll_y;
+                            if (sy >= CONTENT_Y && sy + 18 <= CONTENT_Y + CONTENT_H) {
+                                bool focused = (T->focused_field == T->form_field_count);
+                                color_t bdr = focused ? COLOR_RGB(0, 80, 200) : COLOR_RGB(180, 180, 180);
+                                brw_rect(buf, cw, ch, draw_x, sy, fw, 18, COLOR_WHITE);
+                                brw_rect(buf, cw, ch, draw_x, sy, fw, 1, bdr);
+                                brw_rect(buf, cw, ch, draw_x, sy + 17, fw, 1, bdr);
+                                brw_rect(buf, cw, ch, draw_x, sy, 1, 18, bdr);
+                                brw_rect(buf, cw, ch, draw_x + fw - 1, sy, 1, 18, bdr);
+                                /* Draw text or placeholder */
+                                if (ff->value_len > 0) {
+                                    ff->value[ff->value_len] = '\0';
+                                    int tx = draw_x + 4;
+                                    int max_chars = (fw - 8) / 8;
+                                    int start = 0;
+                                    if (ff->value_len > max_chars) start = ff->value_len - max_chars;
+                                    for (int ci2 = start; ci2 < ff->value_len && tx + 8 < draw_x + fw - 4; ci2++) {
+                                        brw_char_transparent(buf, cw, ch, tx, sy + 1, ff->value[ci2], C_ADDR_FG);
+                                        tx += 8;
+                                    }
+                                } else if (ff->placeholder[0]) {
+                                    brw_text(buf, cw, ch, draw_x + 4, sy + 1, ff->placeholder, COLOR_RGB(160, 160, 160), COLOR_WHITE);
+                                }
+                                if (focused && (timer_get_ticks() / 40) & 1) {
+                                    int cursor_x = draw_x + 4 + ff->cursor * 8;
+                                    if (ff->value_len > (fw - 8) / 8)
+                                        cursor_x = draw_x + 4 + (ff->cursor - (ff->value_len - (fw - 8) / 8)) * 8;
+                                    brw_rect(buf, cw, ch, cursor_x, sy + 2, 2, 14, COLOR_RGB(0, 80, 200));
+                                }
+                            }
+                            draw_x += fw + 4;
+                            T->form_field_count++;
+                        }
+                    }
+                } else if (tag_eq(tag_name, tn, "button")) {
+                    if (!closing) {
+                        /* Collect button text from inner content until </button> */
+                        char btn_text[32];
+                        int bti = 0;
+                        while (pos < page_len && bti < 31) {
+                            if (page_buf[pos] == '<') {
+                                /* Check for </button> */
+                                if (pos + 8 < page_len && page_buf[pos+1] == '/' &&
+                                    to_lower(page_buf[pos+2]) == 'b' && to_lower(page_buf[pos+3]) == 'u' &&
+                                    to_lower(page_buf[pos+4]) == 't' && to_lower(page_buf[pos+5]) == 't' &&
+                                    to_lower(page_buf[pos+6]) == 'o' && to_lower(page_buf[pos+7]) == 'n') {
+                                    while (pos < page_len && page_buf[pos] != '>') pos++;
+                                    if (pos < page_len) pos++;
+                                    break;
+                                }
+                                /* Skip other tags */
+                                while (pos < page_len && page_buf[pos] != '>') pos++;
+                                if (pos < page_len) pos++;
+                                continue;
+                            }
+                            if (page_buf[pos] != '\n' && page_buf[pos] != '\r')
+                                btn_text[bti++] = page_buf[pos];
+                            pos++;
+                        }
+                        btn_text[bti] = '\0';
+                        /* Trim whitespace */
+                        while (bti > 0 && btn_text[bti-1] == ' ') btn_text[--bti] = '\0';
+                        int bs = 0;
+                        while (btn_text[bs] == ' ') bs++;
+
+                        if (T->form_field_count < MAX_FORM_FIELDS) {
+                            struct form_field *ff = &T->form_fields[T->form_field_count];
+                            mem_set(ff, 0, sizeof(*ff));
+                            ff->type = FORM_BUTTON;
+                            str_ncopy(ff->value, btn_text + bs, FORM_VAL_MAX - 1);
+                            ff->value_len = str_len(ff->value);
+                            int btn_w = ff->value_len * 8 + 16;
+                            if (btn_w < 40) btn_w = 40;
+                            ff->x = draw_x; ff->y = draw_y;
+                            ff->w = btn_w; ff->h = 20;
+                            extract_attr(tag_full, tf, "name", ff->name, 32);
+
+                            int sy = CONTENT_Y + draw_y - T->scroll_y;
+                            if (sy >= CONTENT_Y && sy + 20 <= CONTENT_Y + CONTENT_H) {
+                                bool focused = (T->focused_field == T->form_field_count);
+                                color_t btn_bg = focused ? COLOR_RGB(180, 185, 200) : C_BTN_BG;
+                                brw_rect(buf, cw, ch, draw_x, sy, btn_w, 20, btn_bg);
+                                /* Border */
+                                brw_rect(buf, cw, ch, draw_x, sy, btn_w, 1, COLOR_RGB(160, 160, 170));
+                                brw_rect(buf, cw, ch, draw_x, sy + 19, btn_w, 1, COLOR_RGB(160, 160, 170));
+                                brw_rect(buf, cw, ch, draw_x, sy, 1, 20, COLOR_RGB(160, 160, 170));
+                                brw_rect(buf, cw, ch, draw_x + btn_w - 1, sy, 1, 20, COLOR_RGB(160, 160, 170));
+                                brw_text(buf, cw, ch, draw_x + 8, sy + 2, ff->value, C_BTN_FG, btn_bg);
+                            }
+                            draw_x += btn_w + 4;
+                            T->form_field_count++;
+                        }
+                    }
+                } else if (tag_eq(tag_name, tn, "textarea")) {
+                    if (!closing) {
+                        if (T->form_field_count < MAX_FORM_FIELDS) {
+                            struct form_field *ff = &T->form_fields[T->form_field_count];
+                            mem_set(ff, 0, sizeof(*ff));
+                            ff->type = FORM_TEXTAREA;
+                            extract_attr(tag_full, tf, "name", ff->name, 32);
+                            /* Restore or collect initial text */
+                            bool ta_restored = false;
+                            if (T->form_field_count < saved_field_count) {
+                                struct form_field *sf = &saved_fields[T->form_field_count];
+                                mem_copy(ff->value, sf->value, FORM_VAL_MAX);
+                                ff->value_len = sf->value_len;
+                                ff->cursor = sf->cursor;
+                                ta_restored = true;
+                            }
+                            /* Skip inner text until </textarea> */
+                            while (pos < page_len) {
+                                if (page_buf[pos] == '<' && pos + 10 < page_len &&
+                                    page_buf[pos+1] == '/' &&
+                                    to_lower(page_buf[pos+2]) == 't' && to_lower(page_buf[pos+3]) == 'e' &&
+                                    to_lower(page_buf[pos+4]) == 'x' && to_lower(page_buf[pos+5]) == 't' &&
+                                    to_lower(page_buf[pos+6]) == 'a' && to_lower(page_buf[pos+7]) == 'r' &&
+                                    to_lower(page_buf[pos+8]) == 'e' && to_lower(page_buf[pos+9]) == 'a') {
+                                    while (pos < page_len && page_buf[pos] != '>') pos++;
+                                    if (pos < page_len) pos++;
+                                    break;
+                                }
+                                if (!ta_restored && ff->value_len < FORM_VAL_MAX - 1) {
+                                    ff->value[ff->value_len++] = page_buf[pos];
+                                }
+                                pos++;
+                            }
+                            ff->value[ff->value_len] = '\0';
+                            if (!ta_restored) ff->cursor = ff->value_len;
+
+                            int fw = 200, fh = 60;
+                            ff->x = draw_x; ff->y = draw_y;
+                            ff->w = fw; ff->h = fh;
+                            int sy = CONTENT_Y + draw_y - T->scroll_y;
+                            if (sy >= CONTENT_Y && sy + fh <= CONTENT_Y + CONTENT_H) {
+                                bool focused = (T->focused_field == T->form_field_count);
+                                color_t bdr = focused ? COLOR_RGB(0, 80, 200) : COLOR_RGB(180, 180, 180);
+                                brw_rect(buf, cw, ch, draw_x, sy, fw, fh, COLOR_WHITE);
+                                brw_rect(buf, cw, ch, draw_x, sy, fw, 1, bdr);
+                                brw_rect(buf, cw, ch, draw_x, sy + fh - 1, fw, 1, bdr);
+                                brw_rect(buf, cw, ch, draw_x, sy, 1, fh, bdr);
+                                brw_rect(buf, cw, ch, draw_x + fw - 1, sy, 1, fh, bdr);
+                                /* Draw text */
+                                int tx = draw_x + 4, ty = sy + 2;
+                                for (int ci2 = 0; ci2 < ff->value_len; ci2++) {
+                                    if (ff->value[ci2] == '\n') { tx = draw_x + 4; ty += 16; continue; }
+                                    if (tx + 8 > draw_x + fw - 4) { tx = draw_x + 4; ty += 16; }
+                                    if (ty + 16 > sy + fh - 2) break;
+                                    brw_char_transparent(buf, cw, ch, tx, ty, ff->value[ci2], C_ADDR_FG);
+                                    tx += 8;
+                                }
+                                if (focused && (timer_get_ticks() / 40) & 1) {
+                                    brw_rect(buf, cw, ch, tx, ty + 1, 2, 14, COLOR_RGB(0, 80, 200));
+                                }
+                            }
+                            draw_y += fh + 4;
+                            draw_x = 8 + cur_style()->padding_left;
+                            T->form_field_count++;
+                            is_block = true;
+                        }
+                    }
+                } else if (tag_eq(tag_name, tn, "select")) {
+                    if (!closing) {
+                        if (T->form_field_count < MAX_FORM_FIELDS) {
+                            struct form_field *ff = &T->form_fields[T->form_field_count];
+                            mem_set(ff, 0, sizeof(*ff));
+                            ff->type = FORM_SELECT;
+                            extract_attr(tag_full, tf, "name", ff->name, 32);
+                            /* Restore user selection from previous frame */
+                            if (T->form_field_count < saved_field_count) {
+                                struct form_field *sf = &saved_fields[T->form_field_count];
+                                ff->selected_option = sf->selected_option;
+                                ff->dropdown_open = sf->dropdown_open;
+                            }
+                            /* Parse <option> children */
+                            while (pos < page_len && ff->option_count < FORM_OPT_MAX) {
+                                /* Find next <option> or </select> */
+                                while (pos < page_len && page_buf[pos] != '<') pos++;
+                                if (pos >= page_len) break;
+                                if (pos + 8 < page_len && page_buf[pos+1] == '/' &&
+                                    to_lower(page_buf[pos+2]) == 's' && to_lower(page_buf[pos+3]) == 'e' &&
+                                    to_lower(page_buf[pos+4]) == 'l' && to_lower(page_buf[pos+5]) == 'e' &&
+                                    to_lower(page_buf[pos+6]) == 'c' && to_lower(page_buf[pos+7]) == 't') {
+                                    while (pos < page_len && page_buf[pos] != '>') pos++;
+                                    if (pos < page_len) pos++;
+                                    break;
+                                }
+                                if (pos + 6 < page_len &&
+                                    to_lower(page_buf[pos+1]) == 'o' && to_lower(page_buf[pos+2]) == 'p' &&
+                                    to_lower(page_buf[pos+3]) == 't' && to_lower(page_buf[pos+4]) == 'i' &&
+                                    to_lower(page_buf[pos+5]) == 'o' && to_lower(page_buf[pos+6]) == 'n') {
+                                    /* Skip to > */
+                                    while (pos < page_len && page_buf[pos] != '>') pos++;
+                                    if (pos < page_len) pos++;
+                                    /* Collect text until </option> or next < */
+                                    int oi = 0;
+                                    while (pos < page_len && page_buf[pos] != '<' && oi < 31) {
+                                        if (page_buf[pos] != '\n' && page_buf[pos] != '\r')
+                                            ff->options[ff->option_count][oi++] = page_buf[pos];
+                                        pos++;
+                                    }
+                                    ff->options[ff->option_count][oi] = '\0';
+                                    /* Trim */
+                                    while (oi > 0 && ff->options[ff->option_count][oi-1] == ' ')
+                                        ff->options[ff->option_count][--oi] = '\0';
+                                    ff->option_count++;
+                                    /* Skip </option> if present */
+                                    if (pos < page_len && page_buf[pos] == '<' &&
+                                        pos + 1 < page_len && page_buf[pos+1] == '/') {
+                                        while (pos < page_len && page_buf[pos] != '>') pos++;
+                                        if (pos < page_len) pos++;
+                                    }
+                                    continue;
+                                }
+                                /* Skip unknown tag */
+                                while (pos < page_len && page_buf[pos] != '>') pos++;
+                                if (pos < page_len) pos++;
+                            }
+
+                            /* Render the select dropdown */
+                            int sw = 120;
+                            ff->x = draw_x; ff->y = draw_y;
+                            ff->w = sw; ff->h = 18;
+                            int sy = CONTENT_Y + draw_y - T->scroll_y;
+                            if (sy >= CONTENT_Y && sy + 18 <= CONTENT_Y + CONTENT_H) {
+                                bool focused = (T->focused_field == T->form_field_count);
+                                color_t bdr = focused ? COLOR_RGB(0, 80, 200) : COLOR_RGB(180, 180, 180);
+                                brw_rect(buf, cw, ch, draw_x, sy, sw, 18, COLOR_WHITE);
+                                brw_rect(buf, cw, ch, draw_x, sy, sw, 1, bdr);
+                                brw_rect(buf, cw, ch, draw_x, sy + 17, sw, 1, bdr);
+                                brw_rect(buf, cw, ch, draw_x, sy, 1, 18, bdr);
+                                brw_rect(buf, cw, ch, draw_x + sw - 1, sy, 1, 18, bdr);
+                                /* Arrow indicator */
+                                brw_rect(buf, cw, ch, draw_x + sw - 16, sy, 1, 18, bdr);
+                                brw_char_transparent(buf, cw, ch, draw_x + sw - 12, sy + 1, 'v', C_ADDR_FG);
+                                /* Selected option text */
+                                if (ff->option_count > 0 && ff->selected_option < ff->option_count) {
+                                    brw_text(buf, cw, ch, draw_x + 4, sy + 1,
+                                             ff->options[ff->selected_option], C_ADDR_FG, COLOR_WHITE);
+                                }
+                                /* Draw dropdown options if open */
+                                if (ff->dropdown_open && ff->option_count > 0) {
+                                    int dy = sy + 18;
+                                    for (int oi = 0; oi < ff->option_count; oi++) {
+                                        if (dy + 16 > CONTENT_Y + CONTENT_H) break;
+                                        color_t opt_bg = (oi == ff->selected_option) ?
+                                            COLOR_RGB(0, 80, 200) : COLOR_WHITE;
+                                        color_t opt_fg = (oi == ff->selected_option) ?
+                                            COLOR_WHITE : C_ADDR_FG;
+                                        brw_rect(buf, cw, ch, draw_x, dy, sw, 16, opt_bg);
+                                        brw_rect(buf, cw, ch, draw_x, dy, 1, 16, bdr);
+                                        brw_rect(buf, cw, ch, draw_x + sw - 1, dy, 1, 16, bdr);
+                                        if (oi == ff->option_count - 1)
+                                            brw_rect(buf, cw, ch, draw_x, dy + 15, sw, 1, bdr);
+                                        brw_text(buf, cw, ch, draw_x + 4, dy, ff->options[oi], opt_fg, opt_bg);
+                                        dy += 16;
+                                    }
+                                }
+                            }
+                            draw_x += sw + 4;
+                            T->form_field_count++;
+                        }
+                    }
+                } else if (tag_eq(tag_name, tn, "option")) {
+                    /* Options are parsed inside <select> handler, skip stray ones */
+                    if (!closing) {
+                        while (pos < page_len && page_buf[pos] != '<') pos++;
+                    }
+                } else if (tag_eq(tag_name, tn, "form")) {
+                    /* <form> is a block container */
+                    if (!closing) { draw_y += 4; draw_x = 8 + cur_style()->padding_left; }
+                    else { draw_y += 4; draw_x = 8; }
+                    is_block = true;
                 }
                 if (is_block) {
-                    if (!closing) draw_y += cur_style()->margin_top;
+                    if (!closing) {
+                        draw_y += cur_style()->margin_top;
+                        /* Draw top border if element has border */
+                        if (!hidden && cur_style()->has_border) {
+                            int bw = cur_style()->border_width;
+                            if (bw < 1) bw = 1;
+                            if (bw > 4) bw = 4;
+                            color_t bc = cur_style()->border_color;
+                            int bx = 8 + cur_style()->margin_left;
+                            int by = CONTENT_Y + draw_y - T->scroll_y;
+                            int bwidth = BRW_W - 16 - cur_style()->margin_left - cur_style()->margin_right;
+                            if (by >= CONTENT_Y && by < CONTENT_Y + CONTENT_H)
+                                brw_rect(buf, cw, ch, bx, by, bwidth, bw, bc);
+                            draw_y += bw + 2;
+                        }
+                        draw_y += cur_style()->padding_top;
+                        draw_x += cur_style()->margin_left;
+                        /* Apply width constraint */
+                        if (cur_style()->has_width && cur_style()->width > 0 && cur_style()->width < max_x - draw_x)
+                            max_x = draw_x + cur_style()->width;
+                        else if (cur_style()->has_max_width && cur_style()->max_width > 0 && draw_x + cur_style()->max_width < max_x)
+                            max_x = draw_x + cur_style()->max_width;
+                    }
                     last_was_space = true;
                     line_start = true;
                 }
@@ -1169,7 +1960,25 @@ void browser_render(void) {
                         brw_rect(buf, cw, ch, 8, rule_y, BRW_W - 16, 1, cur_style()->border_bottom_color);
                     draw_y += 2;
                 }
+                draw_y += cur_style()->padding_bottom;
+                /* Draw border box if element has border */
+                if (!hidden && cur_style()->has_border) {
+                    /* We approximate: draw border lines at current draw_y position */
+                    int bw = cur_style()->border_width;
+                    if (bw < 1) bw = 1;
+                    if (bw > 4) bw = 4;
+                    color_t bc = cur_style()->border_color;
+                    int bx = 8 + cur_style()->margin_left;
+                    int by_end = CONTENT_Y + draw_y - T->scroll_y;
+                    int bwidth = BRW_W - 16 - cur_style()->margin_left - cur_style()->margin_right;
+                    /* Bottom border */
+                    if (by_end >= CONTENT_Y && by_end < CONTENT_Y + CONTENT_H)
+                        brw_rect(buf, cw, ch, bx, by_end, bwidth, bw, bc);
+                    draw_y += bw + 2;
+                }
                 draw_y += cur_style()->margin_bottom;
+                /* Restore max_x */
+                max_x = BRW_W - 16;
                 style_pop();
             }
             continue;
@@ -1178,10 +1987,39 @@ void browser_render(void) {
         if (in_style_tag) { pos++; continue; }
         if (cur_style()->display_none) { pos++; continue; }
 
-        char c = page_buf[pos++];
-        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        char c = page_buf[pos];
+        bool is_nbsp = false;
 
-        if (c == ' ') {
+        /* Decode HTML entities */
+        if (c == '&') {
+            char decoded;
+            int consumed = decode_entity(page_buf, pos, page_len, &decoded, &is_nbsp);
+            if (consumed > 0) {
+                c = decoded;
+                pos += consumed;
+            } else {
+                pos++;
+            }
+        } else {
+            pos++;
+        }
+
+        /* white-space: pre preserves newlines and tabs */
+        if (cur_style()->white_space_pre) {
+            if (c == '\n') {
+                draw_y += cur_style()->line_height ? cur_style()->line_height : 16;
+                draw_x = 8 + cur_style()->padding_left + cur_style()->margin_left;
+                line_start = true;
+                last_was_space = false;
+                continue;
+            }
+            if (c == '\t') c = ' '; /* tab as space but don't collapse */
+            /* don't collapse spaces in pre mode */
+        } else {
+            if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        }
+
+        if (c == ' ' && !is_nbsp && !cur_style()->white_space_pre) {
             if (last_was_space || line_start) continue;
             last_was_space = true;
         } else {
@@ -1189,6 +2027,18 @@ void browser_render(void) {
         }
 
         struct render_style *st = cur_style();
+
+        /* visibility: hidden — take up space but don't draw */
+        if (st->visibility_hidden) {
+            int char_w = 8 + st->letter_spacing;
+            draw_x += char_w;
+            if (draw_x + char_w > max_x) {
+                draw_y += st->line_height ? st->line_height : 16;
+                draw_x = 8 + st->padding_left + st->margin_left;
+                line_start = true;
+            }
+            continue;
+        }
         color_t fg;
         if (in_link) {
             fg = C_LINK;
@@ -1212,20 +2062,23 @@ void browser_render(void) {
             fg = st->color;
         }
 
+        int char_w = 8 + st->letter_spacing;
+        int line_h = st->line_height ? st->line_height : 16;
+
         if (c == ' ') {
             int ww = measure_word(page_buf, page_len, pos);
-            if (ww > 0 && draw_x + 8 + ww > max_x) {
-                draw_y += 16;
-                draw_x = (in_list ? 24 : 8) + st->padding_left;
+            if (ww > 0 && draw_x + char_w + ww > max_x) {
+                draw_y += line_h;
+                draw_x = (in_list ? 24 : 8) + st->padding_left + st->margin_left;
                 line_start = true;
                 last_was_space = true;
                 continue;
             }
         }
 
-        if (draw_x + 8 > max_x) {
-            draw_y += 16;
-            draw_x = (in_list ? 24 : 8) + st->padding_left;
+        if (draw_x + char_w > max_x) {
+            draw_y += line_h;
+            draw_x = (in_list ? 24 : 8) + st->padding_left + st->margin_left;
             line_start = true;
         }
 
@@ -1242,22 +2095,33 @@ void browser_render(void) {
 
         if (at_li_start) {
             int bullet_sy = CONTENT_Y + draw_y - T->scroll_y;
-            if (bullet_sy >= CONTENT_Y && bullet_sy + 16 <= CONTENT_Y + CONTENT_H)
-                brw_rect(buf, cw, ch, draw_x - 12, bullet_sy + 6, 4, 4, C_BULLET);
+            if (bullet_sy >= CONTENT_Y && bullet_sy + 16 <= CONTENT_Y + CONTENT_H) {
+                if (st->list_style != 1) { /* 1 = none */
+                    if (st->list_style == 3) /* square */
+                        brw_rect(buf, cw, ch, draw_x - 12, bullet_sy + 5, 6, 6, C_BULLET);
+                    else if (st->list_style == 2) { /* circle - outline only */
+                        brw_rect(buf, cw, ch, draw_x - 12, bullet_sy + 5, 6, 1, C_BULLET);
+                        brw_rect(buf, cw, ch, draw_x - 12, bullet_sy + 10, 6, 1, C_BULLET);
+                        brw_rect(buf, cw, ch, draw_x - 12, bullet_sy + 5, 1, 6, C_BULLET);
+                        brw_rect(buf, cw, ch, draw_x - 7, bullet_sy + 5, 1, 6, C_BULLET);
+                    } else /* disc (default) */
+                        brw_rect(buf, cw, ch, draw_x - 12, bullet_sy + 6, 4, 4, C_BULLET);
+                }
+            }
             at_li_start = false;
         }
 
         int screen_y = CONTENT_Y + draw_y - T->scroll_y;
         if (screen_y >= CONTENT_Y && screen_y + 16 <= CONTENT_Y + CONTENT_H) {
             if (st->bg_color != C_NONE)
-                brw_rect(buf, cw, ch, draw_x, screen_y, 8, 16, st->bg_color);
+                brw_rect(buf, cw, ch, draw_x, screen_y, char_w, 16, st->bg_color);
 
             brw_char_transparent(buf, cw, ch, draw_x, screen_y, c, fg);
             if (st->underline || in_link)
-                brw_underline(buf, cw, ch, draw_x, screen_y, 8, fg);
+                brw_underline(buf, cw, ch, draw_x, screen_y, char_w, fg);
         }
 
-        draw_x += 8;
+        draw_x += char_w;
     }
 
     /* Scroll clamping */
