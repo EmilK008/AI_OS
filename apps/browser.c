@@ -54,6 +54,67 @@
 /* Navigation history */
 #define HISTORY_MAX 16
 
+/* ===========================================================================
+ * Image Support (PIC format)
+ * =========================================================================== */
+
+#define PIC_PAL_COUNT 16
+static const color_t brw_palette[PIC_PAL_COUNT] = {
+    COLOR_RGB(0, 0, 0),        COLOR_RGB(255, 255, 255),
+    COLOR_RGB(180, 0, 0),      COLOR_RGB(255, 60, 60),
+    COLOR_RGB(220, 120, 0),    COLOR_RGB(255, 200, 0),
+    COLOR_RGB(0, 160, 0),      COLOR_RGB(0, 220, 0),
+    COLOR_RGB(0, 130, 180),    COLOR_RGB(0, 180, 255),
+    COLOR_RGB(0, 0, 180),      COLOR_RGB(80, 80, 255),
+    COLOR_RGB(130, 0, 180),    COLOR_RGB(200, 80, 255),
+    COLOR_RGB(128, 128, 128),  COLOR_RGB(200, 200, 200),
+};
+
+#define IMG_MAX_W 200
+#define IMG_MAX_H 150
+static uint8_t img_decode_buf[IMG_MAX_W * IMG_MAX_H];
+
+static bool pic_decode(const char *data, int size, int *out_w, int *out_h) {
+    if (size < 7) return false;
+    if (data[0] != 'P' || data[1] != 'I' || data[2] != 'C') return false;
+    int w = (uint8_t)data[3] | ((uint8_t)data[4] << 8);
+    int h = (uint8_t)data[5] | ((uint8_t)data[6] << 8);
+    if (w <= 0 || h <= 0) return false;
+    if (w > IMG_MAX_W) w = IMG_MAX_W;
+    if (h > IMG_MAX_H) h = IMG_MAX_H;
+    mem_set(img_decode_buf, 1, (uint32_t)(w * h));
+    int pos = 7;
+    for (int y = 0; y < h; y++) {
+        int x = 0;
+        while (x < w && pos + 1 < size) {
+            int run = (uint8_t)data[pos++];
+            uint8_t val = (uint8_t)data[pos++];
+            if (val >= PIC_PAL_COUNT) val = 0;
+            for (int i = 0; i < run && x < w; i++)
+                img_decode_buf[y * w + x++] = val;
+        }
+    }
+    *out_w = w;
+    *out_h = h;
+    return true;
+}
+
+static void brw_blit_pic(color_t *buf, int cw, int ch __attribute__((unused)),
+                          int dx, int dy, int img_w, int img_h, int scroll_y) {
+    for (int y = 0; y < img_h; y++) {
+        int screen_y = CONTENT_Y + dy + y - scroll_y;
+        if (screen_y < CONTENT_Y) continue;
+        if (screen_y >= CONTENT_Y + CONTENT_H) break;
+        for (int x = 0; x < img_w; x++) {
+            int screen_x = dx + x;
+            if (screen_x < 0 || screen_x >= cw) continue;
+            uint8_t idx = img_decode_buf[y * img_w + x];
+            if (idx < PIC_PAL_COUNT)
+                buf[screen_y * cw + screen_x] = brw_palette[idx];
+        }
+    }
+}
+
 /* Clickable link regions */
 #define MAX_LINKS 32
 struct link_region {
@@ -89,7 +150,36 @@ struct form_field {
     int option_count;
     int selected_option;
     bool dropdown_open;
+    char onclick[64];
 };
+
+/* ===========================================================================
+ * Simple JavaScript Engine
+ * =========================================================================== */
+
+#define MAX_SCRIPT_FUNCS 8
+#define MAX_FUNC_BODY    256
+#define MAX_JS_VARS      8
+
+struct js_func {
+    char name[32];
+    char body[MAX_FUNC_BODY];
+    bool used;
+};
+
+struct js_var {
+    char name[16];
+    char value[64];
+    bool used;
+};
+
+static struct js_func script_funcs[MAX_SCRIPT_FUNCS];
+static int script_func_count = 0;
+static struct js_var js_vars[MAX_JS_VARS];
+
+static bool alert_active = false;
+static char alert_message[128];
+static int alert_ok_x, alert_ok_y, alert_ok_w, alert_ok_h;
 
 /* ===========================================================================
  * CSS Engine
@@ -800,6 +890,220 @@ static void extract_and_parse_styles(struct browser_tab *tab) {
     }
 }
 
+/* Extract and parse <script> blocks for function definitions */
+static void parse_script_blocks(struct browser_tab *tab) {
+    script_func_count = 0;
+    mem_set(js_vars, 0, sizeof(js_vars));
+    int p = 0;
+    while (p < tab->page_len - 8) {
+        if (tab->page_buf[p] == '<' &&
+            to_lower(tab->page_buf[p+1]) == 's' && to_lower(tab->page_buf[p+2]) == 'c' &&
+            to_lower(tab->page_buf[p+3]) == 'r' && to_lower(tab->page_buf[p+4]) == 'i' &&
+            to_lower(tab->page_buf[p+5]) == 'p' && to_lower(tab->page_buf[p+6]) == 't') {
+            p += 7;
+            while (p < tab->page_len && tab->page_buf[p] != '>') p++;
+            if (p < tab->page_len) p++;
+            int start = p;
+            int end = p;
+            while (end < tab->page_len - 9) {
+                if (tab->page_buf[end] == '<' && tab->page_buf[end+1] == '/' &&
+                    to_lower(tab->page_buf[end+2]) == 's' && to_lower(tab->page_buf[end+3]) == 'c' &&
+                    to_lower(tab->page_buf[end+4]) == 'r' && to_lower(tab->page_buf[end+5]) == 'i' &&
+                    to_lower(tab->page_buf[end+6]) == 'p' && to_lower(tab->page_buf[end+7]) == 't') {
+                    break;
+                }
+                end++;
+            }
+            /* Parse function definitions: function name() { body } */
+            int sp = start;
+            while (sp < end && script_func_count < MAX_SCRIPT_FUNCS) {
+                sp = skip_ws(tab->page_buf, sp, end);
+                /* Look for "function " */
+                if (sp + 9 < end &&
+                    tab->page_buf[sp] == 'f' && tab->page_buf[sp+1] == 'u' &&
+                    tab->page_buf[sp+2] == 'n' && tab->page_buf[sp+3] == 'c' &&
+                    tab->page_buf[sp+4] == 't' && tab->page_buf[sp+5] == 'i' &&
+                    tab->page_buf[sp+6] == 'o' && tab->page_buf[sp+7] == 'n' &&
+                    tab->page_buf[sp+8] == ' ') {
+                    sp += 9;
+                    sp = skip_ws(tab->page_buf, sp, end);
+                    /* Extract function name */
+                    struct js_func *fn = &script_funcs[script_func_count];
+                    mem_set(fn, 0, sizeof(*fn));
+                    int ni = 0;
+                    while (sp < end && tab->page_buf[sp] != '(' && ni < 31) {
+                        fn->name[ni++] = tab->page_buf[sp++];
+                    }
+                    fn->name[ni] = '\0';
+                    /* Trim trailing spaces */
+                    while (ni > 0 && fn->name[ni-1] == ' ') fn->name[--ni] = '\0';
+                    /* Skip past () */
+                    while (sp < end && tab->page_buf[sp] != '{') sp++;
+                    if (sp < end) sp++; /* skip '{' */
+                    /* Collect body until '}' */
+                    int bi = 0;
+                    while (sp < end && tab->page_buf[sp] != '}' && bi < MAX_FUNC_BODY - 1) {
+                        fn->body[bi++] = tab->page_buf[sp++];
+                    }
+                    fn->body[bi] = '\0';
+                    if (sp < end) sp++; /* skip '}' */
+                    fn->used = true;
+                    script_func_count++;
+                } else {
+                    sp++;
+                }
+            }
+            p = end;
+        }
+        p++;
+    }
+}
+
+/* Forward declarations for JS engine */
+static void load_page(struct browser_tab *tab, const char *filename);
+
+/* --- JS helpers --- */
+
+static void js_extract_string_arg(const char *stmt, int start, char *out, int max) {
+    out[0] = '\0';
+    int p = start;
+    int slen = str_len(stmt);
+    /* Find opening quote */
+    while (p < slen && stmt[p] != '\'' && stmt[p] != '"') p++;
+    if (p >= slen) return;
+    char quote = stmt[p++];
+    int oi = 0;
+    while (p < slen && stmt[p] != quote && oi < max - 1)
+        out[oi++] = stmt[p++];
+    out[oi] = '\0';
+}
+
+static void js_set_var(const char *name, const char *value) {
+    /* Update existing */
+    for (int i = 0; i < MAX_JS_VARS; i++) {
+        if (js_vars[i].used && str_eq(js_vars[i].name, name)) {
+            str_ncopy(js_vars[i].value, value, 63);
+            return;
+        }
+    }
+    /* Add new */
+    for (int i = 0; i < MAX_JS_VARS; i++) {
+        if (!js_vars[i].used) {
+            js_vars[i].used = true;
+            str_ncopy(js_vars[i].name, name, 15);
+            str_ncopy(js_vars[i].value, value, 63);
+            return;
+        }
+    }
+}
+
+static void js_exec(struct browser_tab *tab, const char *code) {
+    char stmt[128];
+    int clen = str_len(code);
+    int p = 0;
+
+    while (p < clen) {
+        /* Skip whitespace */
+        while (p < clen && (code[p] == ' ' || code[p] == '\n' || code[p] == '\r' || code[p] == '\t'))
+            p++;
+        if (p >= clen) break;
+
+        /* Extract statement until ';' or end */
+        int si = 0;
+        while (p < clen && code[p] != ';' && si < 127)
+            stmt[si++] = code[p++];
+        stmt[si] = '\0';
+        if (p < clen && code[p] == ';') p++;
+
+        /* Trim trailing whitespace */
+        while (si > 0 && (stmt[si-1] == ' ' || stmt[si-1] == '\n' || stmt[si-1] == '\r'))
+            stmt[--si] = '\0';
+        if (si == 0) continue;
+
+        /* Trim leading whitespace */
+        int ss = 0;
+        while (stmt[ss] == ' ' || stmt[ss] == '\t') ss++;
+
+        /* Dispatch: alert('msg') */
+        if (str_starts_with(stmt + ss, "alert(")) {
+            js_extract_string_arg(stmt, ss + 6, alert_message, 128);
+            alert_active = true;
+            continue;
+        }
+
+        /* navigate('file') */
+        if (str_starts_with(stmt + ss, "navigate(")) {
+            char target[ADDR_MAX + 1];
+            js_extract_string_arg(stmt, ss + 9, target, ADDR_MAX);
+            if (target[0]) load_page(tab, target);
+            return; /* Navigation replaces page — stop executing */
+        }
+
+        /* document.title = 'text' */
+        if (str_starts_with(stmt + ss, "document.title")) {
+            int eq = ss + 14;
+            while (stmt[eq] == ' ') eq++;
+            if (stmt[eq] == '=') {
+                eq++;
+                char title[64];
+                js_extract_string_arg(stmt, eq, title, 64);
+                if (title[0]) {
+                    struct window *w = wm_get_window(win_id);
+                    if (w) str_ncopy(w->title, title, 63);
+                }
+            }
+            continue;
+        }
+
+        /* functionName() — call a script function */
+        int paren = ss;
+        while (paren < si && stmt[paren] != '(') paren++;
+        if (paren < si && stmt[paren] == '(' && stmt[paren + 1] == ')') {
+            char fname[32];
+            int fi = 0;
+            for (int j = ss; j < paren && fi < 31; j++)
+                fname[fi++] = stmt[j];
+            fname[fi] = '\0';
+            /* Trim */
+            while (fi > 0 && fname[fi-1] == ' ') fname[--fi] = '\0';
+            /* Look up function */
+            for (int j = 0; j < script_func_count; j++) {
+                if (script_funcs[j].used && str_eq(script_funcs[j].name, fname)) {
+                    js_exec(tab, script_funcs[j].body);
+                    break;
+                }
+            }
+            continue;
+        }
+
+        /* var = value (simple assignment) */
+        int eqi = ss;
+        while (eqi < si && stmt[eqi] != '=') eqi++;
+        if (eqi < si && stmt[eqi] == '=') {
+            char vname[16];
+            int vni = 0;
+            for (int j = ss; j < eqi && vni < 15; j++) {
+                if (stmt[j] != ' ') vname[vni++] = stmt[j];
+            }
+            vname[vni] = '\0';
+            int vstart = eqi + 1;
+            while (stmt[vstart] == ' ') vstart++;
+            /* Try to extract quoted string, otherwise use raw */
+            char val[64];
+            if (stmt[vstart] == '\'' || stmt[vstart] == '"') {
+                js_extract_string_arg(stmt, vstart, val, 64);
+            } else {
+                int vi = 0;
+                for (int j = vstart; j < si && vi < 63; j++)
+                    val[vi++] = stmt[j];
+                val[vi] = '\0';
+                while (vi > 0 && val[vi-1] == ' ') val[--vi] = '\0';
+            }
+            js_set_var(vname, val);
+        }
+    }
+}
+
 /* ---- Drawing helpers ---- */
 
 static void brw_rect(color_t *buf, int cw, int ch, int x, int y, int w, int h, color_t c) {
@@ -893,6 +1197,7 @@ static void load_page(struct browser_tab *tab, const char *filename) {
     tab->page_buf[tab->page_len] = '\0';
 
     extract_and_parse_styles(tab);
+    parse_script_blocks(tab);
     tab->scroll_y = 0;
     tab->link_count = 0;
     tab->hovered_link = -1;
@@ -927,6 +1232,7 @@ static void navigate_back(struct browser_tab *tab) {
         }
     }
     extract_and_parse_styles(tab);
+    parse_script_blocks(tab);
     tab->scroll_y = 0;
     tab->link_count = 0;
     tab->hovered_link = -1;
@@ -961,6 +1267,7 @@ static void navigate_forward(struct browser_tab *tab) {
         }
     }
     extract_and_parse_styles(tab);
+    parse_script_blocks(tab);
     tab->scroll_y = 0;
     tab->link_count = 0;
     tab->hovered_link = -1;
@@ -1003,6 +1310,22 @@ static void close_tab(int idx) {
 /* ---- Event handler ---- */
 
 static void brw_on_event(struct window *win, struct gui_event *evt) {
+    /* Alert modal intercepts all input */
+    if (alert_active) {
+        if (evt->type == EVT_KEY_PRESS) {
+            uint8_t k = evt->key;
+            if (k == '\n' || k == ' ' || k == 0x1B) alert_active = false;
+        }
+        if (evt->type == EVT_MOUSE_DOWN) {
+            int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
+            int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
+            if (mx >= alert_ok_x && mx < alert_ok_x + alert_ok_w &&
+                my >= alert_ok_y && my < alert_ok_y + alert_ok_h)
+                alert_active = false;
+        }
+        return;
+    }
+
     if (evt->type == EVT_KEY_PRESS) {
         uint8_t k = evt->key;
 
@@ -1047,7 +1370,12 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
                 }
                 return;
             }
-            if (ff->type == FORM_CHECKBOX) {
+            if (ff->type == FORM_BUTTON) {
+                if (k == ' ' || k == '\n') {
+                    if (ff->onclick[0]) js_exec(T, ff->onclick);
+                    return;
+                }
+            } else if (ff->type == FORM_CHECKBOX) {
                 if (k == ' ' || k == '\n') { ff->checked = !ff->checked; return; }
             } else if (ff->type == FORM_SELECT) {
                 if (k == KEY_UP && ff->selected_option > 0) { ff->selected_option--; return; }
@@ -1176,7 +1504,9 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
                     content_my >= ff->y && content_my < ff->y + ff->h) {
                     T->focused_field = i;
                     addr_focused = false;
-                    if (ff->type == FORM_CHECKBOX) {
+                    if (ff->type == FORM_BUTTON) {
+                        if (ff->onclick[0]) { js_exec(T, ff->onclick); return; }
+                    } else if (ff->type == FORM_CHECKBOX) {
                         ff->checked = !ff->checked;
                     } else if (ff->type == FORM_SELECT) {
                         if (ff->dropdown_open) {
@@ -1455,6 +1785,24 @@ void browser_render(void) {
             }
             if (in_style_tag) continue;
 
+            /* Skip <script> block content */
+            if (tag_eq(tag_name, tn, "script")) {
+                if (!closing) {
+                    while (pos < page_len - 9) {
+                        if (page_buf[pos] == '<' && page_buf[pos+1] == '/' &&
+                            to_lower(page_buf[pos+2]) == 's' && to_lower(page_buf[pos+3]) == 'c' &&
+                            to_lower(page_buf[pos+4]) == 'r' && to_lower(page_buf[pos+5]) == 'i' &&
+                            to_lower(page_buf[pos+6]) == 'p' && to_lower(page_buf[pos+7]) == 't') {
+                            while (pos < page_len && page_buf[pos] != '>') pos++;
+                            if (pos < page_len) pos++;
+                            break;
+                        }
+                        pos++;
+                    }
+                }
+                continue;
+            }
+
             if (!closing) {
                 style_push();
 
@@ -1585,6 +1933,7 @@ void browser_render(void) {
                         char type_val[16];
                         extract_attr(tag_full, tf, "type", type_val, 16);
                         extract_attr(tag_full, tf, "name", ff->name, 32);
+                        extract_attr(tag_full, tf, "onclick", ff->onclick, 64);
                         if (T->form_field_count >= saved_field_count) {
                             /* First time: read value from HTML */
                             extract_attr(tag_full, tf, "value", ff->value, FORM_VAL_MAX);
@@ -1727,6 +2076,7 @@ void browser_render(void) {
                             ff->x = draw_x; ff->y = draw_y;
                             ff->w = btn_w; ff->h = 20;
                             extract_attr(tag_full, tf, "name", ff->name, 32);
+                            extract_attr(tag_full, tf, "onclick", ff->onclick, 64);
 
                             int sy = CONTENT_Y + draw_y - T->scroll_y;
                             if (sy >= CONTENT_Y && sy + 20 <= CONTENT_Y + CONTENT_H) {
@@ -1923,6 +2273,48 @@ void browser_render(void) {
                     if (!closing) { draw_y += 4; draw_x = 8 + cur_style()->padding_left; }
                     else { draw_y += 4; draw_x = 8; }
                     is_block = true;
+                } else if (tag_eq(tag_name, tn, "img") && !closing) {
+                    /* Self-closing <img> tag */
+                    char img_src[ADDR_MAX + 1];
+                    char img_alt[32];
+                    extract_attr(tag_full, tf, "src", img_src, ADDR_MAX);
+                    extract_attr(tag_full, tf, "alt", img_alt, 32);
+                    bool img_ok = false;
+                    int img_w = 0, img_h = 0;
+                    if (img_src[0]) {
+                        int fidx = fs_find(img_src);
+                        if (fidx >= 0) {
+                            struct fs_node *fnode = fs_get_node(fidx);
+                            if (fnode && fnode->type == FS_FILE && fnode->data) {
+                                img_ok = pic_decode(fnode->data, (int)fnode->size, &img_w, &img_h);
+                            }
+                        }
+                    }
+                    if (img_ok && img_w > 0 && img_h > 0) {
+                        brw_blit_pic(buf, cw, ch, draw_x, draw_y, img_w, img_h, T->scroll_y);
+                        draw_y += img_h + 4;
+                    } else {
+                        /* Show [alt] fallback */
+                        int sy = CONTENT_Y + draw_y - T->scroll_y;
+                        if (sy >= CONTENT_Y && sy + 16 <= CONTENT_Y + CONTENT_H) {
+                            brw_char_transparent(buf, cw, ch, draw_x, sy, '[', COLOR_RGB(180, 60, 60));
+                            draw_x += 8;
+                            const char *alt = img_alt[0] ? img_alt : "img";
+                            while (*alt) {
+                                brw_char_transparent(buf, cw, ch, draw_x, sy, *alt, COLOR_RGB(180, 60, 60));
+                                draw_x += 8;
+                                alt++;
+                            }
+                            brw_char_transparent(buf, cw, ch, draw_x, sy, ']', COLOR_RGB(180, 60, 60));
+                            draw_x += 8;
+                        }
+                        draw_y += 20;
+                    }
+                    draw_x = 8 + cur_style()->padding_left;
+                    style_pop(); /* <img> is void — pop the style pushed for it */
+                    is_block = true;
+                    last_was_space = true;
+                    line_start = true;
                 }
                 if (is_block) {
                     if (!closing) {
@@ -2145,5 +2537,53 @@ void browser_render(void) {
         int thumb_y = CONTENT_Y + 2 + (T->scroll_y * (track_h - thumb_h)) / (T->content_total_h - CONTENT_H);
         brw_rect(buf, cw, ch, BRW_W - 6, CONTENT_Y + 2, 4, track_h, COLOR_RGB(210, 210, 215));
         brw_rect(buf, cw, ch, BRW_W - 6, thumb_y, 4, thumb_h, COLOR_RGB(160, 160, 170));
+    }
+
+    /* Alert overlay */
+    if (alert_active) {
+        /* Darken content area with checkerboard pattern */
+        for (int py = CONTENT_Y; py < BRW_H - STATUS_H; py++) {
+            for (int px = 0; px < cw; px++) {
+                if ((px + py) & 1)
+                    buf[py * cw + px] = COLOR_RGB(0, 0, 0);
+            }
+        }
+        /* Centered alert box */
+        int aw = 280, ah = 80;
+        int ax = (BRW_W - aw) / 2;
+        int ay = CONTENT_Y + (CONTENT_H - ah) / 2;
+        brw_rect(buf, cw, ch, ax, ay, aw, ah, COLOR_WHITE);
+        /* Border */
+        brw_rect(buf, cw, ch, ax, ay, aw, 2, COLOR_RGB(60, 60, 120));
+        brw_rect(buf, cw, ch, ax, ay + ah - 2, aw, 2, COLOR_RGB(60, 60, 120));
+        brw_rect(buf, cw, ch, ax, ay, 2, ah, COLOR_RGB(60, 60, 120));
+        brw_rect(buf, cw, ch, ax + aw - 2, ay, 2, ah, COLOR_RGB(60, 60, 120));
+        /* Title bar */
+        brw_rect(buf, cw, ch, ax + 2, ay + 2, aw - 4, 18, COLOR_RGB(60, 60, 120));
+        brw_text(buf, cw, ch, ax + 8, ay + 3, "Alert", COLOR_WHITE, COLOR_RGB(60, 60, 120));
+        /* Message text (word wrap within box) */
+        int msg_x = ax + 12, msg_y = ay + 24;
+        int msg_max_x = ax + aw - 12;
+        const char *mp = alert_message;
+        while (*mp) {
+            if (msg_x + 8 > msg_max_x) { msg_x = ax + 12; msg_y += 16; }
+            if (msg_y + 16 > ay + ah - 24) break;
+            brw_char_transparent(buf, cw, ch, msg_x, msg_y, *mp, COLOR_RGB(30, 30, 30));
+            msg_x += 8;
+            mp++;
+        }
+        /* OK button */
+        int ok_w = 48, ok_h = 18;
+        int ok_x = ax + (aw - ok_w) / 2;
+        int ok_y = ay + ah - ok_h - 6;
+        brw_rect(buf, cw, ch, ok_x, ok_y, ok_w, ok_h, C_BTN_BG);
+        brw_rect(buf, cw, ch, ok_x, ok_y, ok_w, 1, COLOR_RGB(160, 160, 170));
+        brw_rect(buf, cw, ch, ok_x, ok_y + ok_h - 1, ok_w, 1, COLOR_RGB(160, 160, 170));
+        brw_rect(buf, cw, ch, ok_x, ok_y, 1, ok_h, COLOR_RGB(160, 160, 170));
+        brw_rect(buf, cw, ch, ok_x + ok_w - 1, ok_y, 1, ok_h, COLOR_RGB(160, 160, 170));
+        brw_text(buf, cw, ch, ok_x + 12, ok_y + 1, "OK", C_BTN_FG, C_BTN_BG);
+        /* Store OK button coords for click detection */
+        alert_ok_x = ok_x; alert_ok_y = ok_y;
+        alert_ok_w = ok_w; alert_ok_h = ok_h;
     }
 }

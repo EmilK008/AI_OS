@@ -113,7 +113,8 @@ void fs_init_defaults(void) {
             "<!-- Links to other local files -->"
             "<p>Links: <a href=\"readme.txt\">readme.txt</a> | "
             "<a href=\"demo.htm\">demo page</a> | "
-            "<a href=\"features.htm\">features demo</a></p>"
+            "<a href=\"features.htm\">features demo</a> | "
+            "<a href=\"jsdemo.htm\">JS demo</a></p>"
             "<!-- Navigation hints -->"
             "<p>Scroll: PgUp/PgDn | Back: Backspace</p>"
             "<p>Tabs: Ctrl+T new | Ctrl+W close</p>";
@@ -206,6 +207,62 @@ void fs_init_defaults(void) {
             "<p class=\"small\">Use Tab to cycle form fields. "
             "Click to focus. Esc to unfocus.</p>";
         fs_write_file(features, htm, str_len(htm));
+    }
+
+    /* Create JavaScript demo page */
+    int jsdemo = fs_create("jsdemo.htm", FS_FILE);
+    if (jsdemo >= 0) {
+        const char *htm =
+            "<style>"
+            "h1 { color: steelblue; text-align: center; }"
+            "h2 { color: crimson; }"
+            ".demo { border: 2px solid navy; padding: 8; margin: 8; }"
+            ".info { background: lightyellow; padding: 6; }"
+            "</style>"
+            "<script>"
+            "function greet() {"
+            "  alert('Hello from JavaScript!');"
+            "  document.title = 'Greeted!';"
+            "}"
+            "function goHome() {"
+            "  navigate('home.htm');"
+            "}"
+            "function about() {"
+            "  alert('AI_OS Browser v0.4 - Now with JS!');"
+            "}"
+            "</script>"
+            "<h1>JavaScript Demo</h1>"
+            "<div class=\"demo\">"
+            "<h2>Alert</h2>"
+            "<p>Click to show a message box:</p>"
+            "<p><button onclick=\"alert('Hello World!')\">Say Hello</button> "
+            "<button onclick=\"alert('This is an alert dialog!')\">Info</button></p>"
+            "</div>"
+            "<div class=\"demo\">"
+            "<h2>Functions</h2>"
+            "<p>Buttons calling script functions:</p>"
+            "<p><button onclick=\"greet()\">Greet</button> "
+            "<button onclick=\"about()\">About</button></p>"
+            "</div>"
+            "<div class=\"demo\">"
+            "<h2>Navigation</h2>"
+            "<p>Navigate via JavaScript:</p>"
+            "<p><button onclick=\"navigate('home.htm')\">Go Home</button> "
+            "<button onclick=\"navigate('features.htm')\">Features</button></p>"
+            "</div>"
+            "<div class=\"demo\">"
+            "<h2>Change Title</h2>"
+            "<p><button onclick=\"document.title = 'Custom Title!'\">Set Title</button> "
+            "<button onclick=\"document.title = 'Browser'\">Reset Title</button></p>"
+            "</div>"
+            "<hr>"
+            "<div class=\"info\">"
+            "<p>Supported: alert(), navigate(), document.title, "
+            "function calls, variables</p>"
+            "</div>"
+            "<p><a href=\"home.htm\">Home</a> | "
+            "<a href=\"features.htm\">Features</a></p>";
+        fs_write_file(jsdemo, htm, str_len(htm));
     }
 }
 
