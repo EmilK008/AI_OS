@@ -44,6 +44,7 @@ static volatile int buf_tail = 0;
 static volatile bool shift_pressed = false;
 static volatile bool caps_lock = false;
 static volatile bool ctrl_pressed = false;
+static volatile bool alt_pressed = false;
 static volatile bool extended_key = false;
 static volatile bool gui_mode_active = false;
 
@@ -105,14 +106,28 @@ void keyboard_handler(void) {
         uint8_t released = scancode & 0x7F;
         if (released == 0x2A || released == 0x36) shift_pressed = false;
         if (released == 0x1D) ctrl_pressed = false;
+        if (released == 0x38) alt_pressed = false;
     } else {
         /* Key press */
         if (scancode == 0x2A || scancode == 0x36) {
             shift_pressed = true;
         } else if (scancode == 0x1D) {
             ctrl_pressed = true;
+        } else if (scancode == 0x38) {
+            alt_pressed = true;
         } else if (scancode == 0x3A) {
             caps_lock = !caps_lock;
+        } else if (alt_pressed && scancode == 0x0F) {
+            /* Alt+Tab: send special key event */
+            if (gui_mode_active) {
+                struct gui_event evt;
+                evt.type = EVT_KEY_PRESS;
+                evt.key = KEY_ALTTAB;
+                evt.mouse_x = 0;
+                evt.mouse_y = 0;
+                evt.mouse_button = 0;
+                event_push(&evt);
+            }
         } else {
             char c;
             if (shift_pressed) {
@@ -184,4 +199,8 @@ void keyboard_set_gui_mode(bool enabled) {
 
 void keyboard_inject_char(uint8_t c) {
     buffer_put(c);
+}
+
+bool keyboard_alt_held(void) {
+    return alt_pressed;
 }

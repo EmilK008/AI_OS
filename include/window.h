@@ -30,5 +30,8 @@ struct window *wm_get_window(int id);
 void wm_focus_window(int id);
 void wm_render_all(void);
 void wm_handle_event(struct gui_event *evt);
+void wm_alt_tab(void);         /* Cycle to next window (Alt+Tab) */
+bool wm_switcher_active(void); /* Is the switcher overlay showing? */
+void wm_switcher_commit(void); /* Finalize switch when Alt released */
 
 #endif

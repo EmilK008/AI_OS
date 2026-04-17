@@ -12,6 +12,7 @@
 #include "shell.h"
 #include "process.h"
 #include "appmenu.h"
+#include "keyboard.h"
 
 static struct window windows[MAX_WINDOWS];
 static int z_order[MAX_WINDOWS];
@@ -21,6 +22,10 @@ static int z_count = 0;
 static bool     dragging = false;
 static int      drag_id = -1;
 static int16_t  drag_off_x, drag_off_y;
+
+/* Alt+Tab switcher state */
+static bool switcher_showing = false;
+static int  switcher_sel = 0;
 
 /* 12x19 arrow cursor bitmap: 0=transparent, 1=black, 2=white */
 static const uint8_t cursor_data[19][12] = {
@@ -185,6 +190,9 @@ static bool in_content(struct window *win, int mx, int my) {
 }
 
 void wm_handle_event(struct gui_event *evt) {
+    /* Block input while Alt+Tab switcher is active */
+    if (switcher_showing) return;
+
     if (evt->type == EVT_MOUSE_DOWN && evt->mouse_button == 0) {
         /* Check if app menu item clicked */
         if (appmenu_is_open()) {
@@ -272,6 +280,79 @@ void wm_handle_event(struct gui_event *evt) {
     }
 }
 
+/* ---- Alt+Tab Window Switcher ---- */
+
+void wm_alt_tab(void) {
+    if (z_count < 2) return;
+    if (!switcher_showing) {
+        switcher_showing = true;
+        /* Start at the window behind the current top */
+        switcher_sel = z_count - 2;
+    } else {
+        /* Cycle backwards through z-order */
+        switcher_sel--;
+        if (switcher_sel < 0) switcher_sel = z_count - 1;
+    }
+}
+
+bool wm_switcher_active(void) {
+    return switcher_showing;
+}
+
+void wm_switcher_commit(void) {
+    if (!switcher_showing) return;
+    switcher_showing = false;
+    if (switcher_sel >= 0 && switcher_sel < z_count) {
+        wm_focus_window(z_order[switcher_sel]);
+    }
+}
+
+static void draw_switcher_overlay(void) {
+    if (!switcher_showing || z_count == 0) return;
+
+    int scr_w = fb_get_width();
+    int scr_h = fb_get_height();
+
+    /* Calculate overlay size */
+    int item_w = 160;
+    int item_h = 28;
+    int padding = 8;
+    int total_w = item_w + padding * 2;
+    int total_h = z_count * item_h + padding * 2;
+    int ox = (scr_w - total_w) / 2;
+    int oy = (scr_h - total_h) / 2;
+
+    /* Dark semi-transparent background (checkerboard for "transparency") */
+    for (int y = oy - 2; y < oy + total_h + 2; y++) {
+        for (int x = ox - 2; x < ox + total_w + 2; x++) {
+            if ((x + y) % 2 == 0)
+                fb_putpixel(x, y, 0x00000000);
+        }
+    }
+
+    /* Solid background box */
+    fb_fill_rect(ox, oy, total_w, total_h, 0x00202030);
+    fb_draw_rect(ox, oy, total_w, total_h, 0x00606080);
+
+    /* Draw each window entry */
+    for (int i = 0; i < z_count; i++) {
+        struct window *win = &windows[z_order[i]];
+        if (!win->alive) continue;
+
+        int ix = ox + padding;
+        int iy = oy + padding + i * item_h;
+
+        if (i == switcher_sel) {
+            /* Highlight selected */
+            fb_fill_rect(ix - 2, iy - 1, item_w + 4, item_h - 2, 0x00304878);
+            fb_draw_rect(ix - 2, iy - 1, item_w + 4, item_h - 2, 0x005080C0);
+            fb_draw_string(ix + 4, iy + 4, win->title, 0x00FFFFFF, 0x00304878);
+        } else {
+            fb_draw_string(ix + 4, iy + 4, win->title, 0x00BBBBBB, 0x00202030);
+        }
+    }
+}
+
 static void draw_window(struct window *win) {
     if (!win->alive || !win->visible) return;
 
@@ -350,9 +431,16 @@ void wm_render_all(void) {
     /* 4. App menu (above taskbar, below cursor) */
     appmenu_render();
 
-    /* 5. Mouse cursor */
+    /* 5. Alt+Tab switcher overlay */
+    draw_switcher_overlay();
+    /* Auto-commit when Alt is released */
+    if (switcher_showing && !keyboard_alt_held()) {
+        wm_switcher_commit();
+    }
+
+    /* 6. Mouse cursor */
     draw_cursor(mouse_get_x(), mouse_get_y());
 
-    /* 6. Flip */
+    /* 7. Flip */
     fb_flip();
 }

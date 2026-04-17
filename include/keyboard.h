@@ -13,6 +13,7 @@
 #define KEY_DELETE 0x86
 #define KEY_PGUP   0x87
 #define KEY_PGDN   0x88
+#define KEY_ALTTAB 0x89
 
 void keyboard_init(void);
 void keyboard_handler(void);
@@ -20,5 +21,6 @@ bool keyboard_has_key(void);
 char keyboard_getchar(void);
 void keyboard_set_gui_mode(bool enabled);
 void keyboard_inject_char(uint8_t c);
+bool keyboard_alt_held(void);
 
 #endif

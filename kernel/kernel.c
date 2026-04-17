@@ -137,6 +137,11 @@ void kernel_main(void) {
                     }
                     continue;
                 }
+                /* Alt+Tab: window switcher */
+                if (evt.type == EVT_KEY_PRESS && evt.key == KEY_ALTTAB) {
+                    wm_alt_tab();
+                    continue;
+                }
                 wm_handle_event(&evt);
             }
 
