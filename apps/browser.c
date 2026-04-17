@@ -21,7 +21,7 @@
 
 /* Address bar */
 #define ADDR_X      74
-#define ADDR_W      (BRW_W - ADDR_X - 40)
+#define ADDR_W      (BRW_W - ADDR_X - 60)  /* room for star + Go buttons */
 #define ADDR_MAX    30
 
 /* Default colors */
@@ -197,6 +197,39 @@ static struct js_var js_vars[MAX_JS_VARS];
 static bool alert_active = false;
 static char alert_message[128];
 static int alert_ok_x, alert_ok_y, alert_ok_w, alert_ok_h;
+
+/* Prompt modal (JS prompt()) */
+static bool prompt_active = false;
+static char prompt_message[128];
+static char prompt_input[64];
+static int prompt_input_len = 0;
+static char prompt_target_var[16];
+
+/* Table layout state */
+#define MAX_TABLE_COLS 8
+static int tbl_col_count;
+static int tbl_col_x[MAX_TABLE_COLS];
+static int tbl_col_w[MAX_TABLE_COLS];
+static bool in_table;
+static int tbl_row_y;
+static int tbl_col_idx;
+static int tbl_start_x;
+static int tbl_width;
+static int tbl_row_max_h;   /* tallest cell in current row */
+
+/* Interactive scrollbar */
+static bool scrollbar_dragging = false;
+static int scrollbar_drag_offset = 0;
+#define SCROLLBAR_W 8
+
+/* Bookmarks */
+#define MAX_BOOKMARKS 16
+static char bookmarks_list[MAX_BOOKMARKS][ADDR_MAX + 1];
+static int bookmark_count = 0;
+static bool bookmarks_showing = false;
+
+/* View source mode */
+static bool view_source_mode = false;
 
 /* ===========================================================================
  * CSS Engine
@@ -1014,6 +1047,44 @@ static void js_set_var(const char *name, const char *value) {
     }
 }
 
+static const char *js_get_var(const char *name) {
+    for (int i = 0; i < MAX_JS_VARS; i++)
+        if (js_vars[i].used && str_eq(js_vars[i].name, name))
+            return js_vars[i].value;
+    return "";
+}
+
+/* Evaluate an argument expression: handles quoted strings, variable names,
+ * and string concatenation with '+'.
+ * Example: 'Hello ' + name + '!' → "Hello [value_of_name]!" */
+static void js_eval_arg(const char *expr, int start, int end, char *out, int max) {
+    out[0] = '\0';
+    int oi = 0;
+    int p = start;
+    while (p < end && oi < max - 1) {
+        while (p < end && expr[p] == ' ') p++;
+        if (p >= end) break;
+        /* Skip '+' operator */
+        if (expr[p] == '+') { p++; continue; }
+        /* Quoted string literal */
+        if (expr[p] == '\'' || expr[p] == '"') {
+            char q = expr[p++];
+            while (p < end && expr[p] != q && oi < max - 1)
+                out[oi++] = expr[p++];
+            if (p < end) p++; /* skip closing quote */
+        } else {
+            /* Variable name */
+            char vn[16]; int vi = 0;
+            while (p < end && expr[p] != '+' && expr[p] != ' ' && expr[p] != ')' && vi < 15)
+                vn[vi++] = expr[p++];
+            vn[vi] = '\0';
+            const char *val = js_get_var(vn);
+            while (*val && oi < max - 1) out[oi++] = *val++;
+        }
+    }
+    out[oi] = '\0';
+}
+
 static void js_exec(struct browser_tab *tab, const char *code) {
     char stmt[128];
     int clen = str_len(code);
@@ -1025,10 +1096,15 @@ static void js_exec(struct browser_tab *tab, const char *code) {
             p++;
         if (p >= clen) break;
 
-        /* Extract statement until ';' or end */
+        /* Extract statement until ';' or end (brace-aware: skip over { } blocks) */
         int si = 0;
-        while (p < clen && code[p] != ';' && si < 127)
+        int brace_depth = 0;
+        while (p < clen && si < 127) {
+            if (code[p] == '{') brace_depth++;
+            else if (code[p] == '}') { brace_depth--; if (brace_depth < 0) brace_depth = 0; }
+            if (code[p] == ';' && brace_depth == 0) break;
             stmt[si++] = code[p++];
+        }
         stmt[si] = '\0';
         if (p < clen && code[p] == ';') p++;
 
@@ -1041,9 +1117,13 @@ static void js_exec(struct browser_tab *tab, const char *code) {
         int ss = 0;
         while (stmt[ss] == ' ' || stmt[ss] == '\t') ss++;
 
-        /* Dispatch: alert('msg') */
+        /* Dispatch: alert('msg') or alert(expr) */
         if (str_starts_with(stmt + ss, "alert(")) {
-            js_extract_string_arg(stmt, ss + 6, alert_message, 128);
+            /* Find the closing paren */
+            int arg_start = ss + 6;
+            int arg_end = arg_start;
+            while (arg_end < si && stmt[arg_end] != ')') arg_end++;
+            js_eval_arg(stmt, arg_start, arg_end, alert_message, 128);
             alert_active = true;
             continue;
         }
@@ -1070,6 +1150,171 @@ static void js_exec(struct browser_tab *tab, const char *code) {
                 }
             }
             continue;
+        }
+
+        /* if (condition) { ... } else { ... } */
+        if ((str_starts_with(stmt + ss, "if") && stmt[ss + 2] == ' ') || str_starts_with(stmt + ss, "if(")) {
+            /* Find condition between ( and ) */
+            int cp = ss + 2;
+            while (cp < si && stmt[cp] != '(') cp++;
+            if (cp >= si) continue;
+            cp++; /* skip ( */
+            int cond_start = cp;
+            while (cp < si && stmt[cp] != ')') cp++;
+            int cond_end = cp;
+            cp++; /* skip ) */
+            /* Skip to { */
+            while (cp < si && stmt[cp] != '{') cp++;
+            /* We need to work with the original code to find matching braces */
+            /* Find matching } for the if body — but we're working with stmt, so
+             * re-parse from the original code stream */
+            /* Extract condition */
+            char cond[64]; int ci = 0;
+            for (int j = cond_start; j < cond_end && ci < 63; j++)
+                cond[ci++] = stmt[j];
+            cond[ci] = '\0';
+            /* Trim condition */
+            int cs = 0; while (cond[cs] == ' ') cs++;
+            ci--; while (ci > cs && cond[ci] == ' ') ci--;
+            /* Evaluate condition */
+            bool result = false;
+            /* Check for == */
+            int eqp = cs;
+            while (eqp < ci && !(cond[eqp] == '=' && cond[eqp+1] == '=')) eqp++;
+            if (eqp < ci && cond[eqp] == '=' && cond[eqp+1] == '=') {
+                char lhs[32]; int li = 0;
+                for (int j = cs; j < eqp && li < 31; j++) if (cond[j] != ' ') lhs[li++] = cond[j];
+                lhs[li] = '\0';
+                int rp = eqp + 2; while (cond[rp] == ' ') rp++;
+                char rhs[32];
+                if (cond[rp] == '\'' || cond[rp] == '"') {
+                    char q = cond[rp++]; int ri = 0;
+                    while (cond[rp] && cond[rp] != q && ri < 31) rhs[ri++] = cond[rp++];
+                    rhs[ri] = '\0';
+                } else {
+                    int ri = 0;
+                    while (rp <= ci && cond[rp] != ' ' && ri < 31) rhs[ri++] = cond[rp++];
+                    rhs[ri] = '\0';
+                }
+                result = str_eq(js_get_var(lhs), rhs);
+            } else {
+                /* Check for != */
+                int np = cs;
+                while (np < ci && !(cond[np] == '!' && cond[np+1] == '=')) np++;
+                if (np < ci && cond[np] == '!' && cond[np+1] == '=') {
+                    char lhs[32]; int li = 0;
+                    for (int j = cs; j < np && li < 31; j++) if (cond[j] != ' ') lhs[li++] = cond[j];
+                    lhs[li] = '\0';
+                    int rp = np + 2; while (cond[rp] == ' ') rp++;
+                    char rhs[32];
+                    if (cond[rp] == '\'' || cond[rp] == '"') {
+                        char q = cond[rp++]; int ri = 0;
+                        while (cond[rp] && cond[rp] != q && ri < 31) rhs[ri++] = cond[rp++];
+                        rhs[ri] = '\0';
+                    } else {
+                        int ri = 0;
+                        while (rp <= ci && cond[rp] != ' ' && ri < 31) rhs[ri++] = cond[rp++];
+                        rhs[ri] = '\0';
+                    }
+                    result = !str_eq(js_get_var(lhs), rhs);
+                } else {
+                    /* Truthy: variable name — check if non-empty, not "0", not "false" */
+                    char vn[16]; int vi = 0;
+                    for (int j = cs; j <= ci && vi < 15; j++) if (cond[j] != ' ') vn[vi++] = cond[j];
+                    vn[vi] = '\0';
+                    const char *val = js_get_var(vn);
+                    result = (val[0] && !str_eq(val, "0") && !str_eq(val, "false"));
+                }
+            }
+            /* Find if body { ... } — scan the remaining code for braces */
+            /* We need to handle this from the original code, since ';' splitting
+             * breaks code inside { }. So re-scan from 'p' in original code. */
+            /* Actually, the if-else is parsed from the original code stream.
+             * We need to rewind p in the code string to handle braces properly. */
+            /* Simple approach: find { } in the remaining stmt + unparsed code */
+            /* For now, use stmt content after ( ) — look for { body } else { body2 } */
+            int bp = cp; /* points past condition ')' in stmt */
+            while (bp < si && stmt[bp] == ' ') bp++;
+            if (bp < si && stmt[bp] == '{') {
+                bp++; /* skip { */
+                int body_start = bp;
+                /* Count braces */
+                int depth = 1;
+                while (bp < si && depth > 0) {
+                    if (stmt[bp] == '{') depth++;
+                    if (stmt[bp] == '}') depth--;
+                    if (depth > 0) bp++;
+                }
+                int body_end = bp;
+                bp++; /* skip } */
+                /* Check for else */
+                while (bp < si && stmt[bp] == ' ') bp++;
+                char else_body[128];
+                else_body[0] = '\0';
+                if (str_starts_with(stmt + bp, "else")) {
+                    bp += 4;
+                    while (bp < si && stmt[bp] == ' ') bp++;
+                    if (bp < si && stmt[bp] == '{') {
+                        bp++; int eb_start = bp;
+                        depth = 1;
+                        while (bp < si && depth > 0) {
+                            if (stmt[bp] == '{') depth++;
+                            if (stmt[bp] == '}') depth--;
+                            if (depth > 0) bp++;
+                        }
+                        int ebi = 0;
+                        for (int j = eb_start; j < bp && ebi < 127; j++)
+                            else_body[ebi++] = stmt[j];
+                        else_body[ebi] = '\0';
+                    }
+                }
+                if (result) {
+                    char body[128]; int bi = 0;
+                    for (int j = body_start; j < body_end && bi < 127; j++)
+                        body[bi++] = stmt[j];
+                    body[bi] = '\0';
+                    js_exec(tab, body);
+                } else if (else_body[0]) {
+                    js_exec(tab, else_body);
+                }
+            }
+            continue;
+        }
+
+        /* prompt('message') — show input modal, optionally: var x = prompt('msg') */
+        if (str_starts_with(stmt + ss, "prompt(") ||
+            (str_starts_with(stmt + ss, "var ") && /* var x = prompt(...) */
+             false)) { /* handled below */
+        }
+        /* var x = prompt('msg') */
+        {
+            /* Check for "var name = prompt(" or "name = prompt(" pattern */
+            bool is_prompt = false;
+            char tgt_var[16]; tgt_var[0] = '\0';
+            int pp = ss;
+            if (str_starts_with(stmt + pp, "var ")) pp += 4;
+            /* Collect variable name */
+            int vni = 0;
+            while (pp < si && stmt[pp] != '=' && stmt[pp] != ' ' && vni < 15)
+                tgt_var[vni++] = stmt[pp++];
+            tgt_var[vni] = '\0';
+            while (pp < si && stmt[pp] == ' ') pp++;
+            if (pp < si && stmt[pp] == '=') {
+                pp++; while (pp < si && stmt[pp] == ' ') pp++;
+                if (str_starts_with(stmt + pp, "prompt(")) {
+                    is_prompt = true;
+                    int arg_s = pp + 7;
+                    int arg_e = arg_s;
+                    while (arg_e < si && stmt[arg_e] != ')') arg_e++;
+                    js_eval_arg(stmt, arg_s, arg_e, prompt_message, 128);
+                    str_ncopy(prompt_target_var, tgt_var, 15);
+                    prompt_input[0] = '\0';
+                    prompt_input_len = 0;
+                    prompt_active = true;
+                    return; /* Wait for user input */
+                }
+            }
+            if (is_prompt) continue;
         }
 
         /* functionName() — call a script function */
@@ -1169,6 +1414,107 @@ static void brw_underline(color_t *buf, int cw, int ch, int px, int py, int char
     if (uy >= 0 && uy < ch) {
         for (int x = px; x < px + char_w && x < cw; x++) {
             if (x >= 0) buf[uy * cw + x] = c;
+        }
+    }
+}
+
+/* ---- Table helpers ---- */
+
+/* Count columns in the first <tr> of a table starting at pos */
+static int count_table_columns(const char *html, int pos, int len) {
+    int cols = 0;
+    int depth = 0; /* nesting depth for skipping inner tables */
+    while (pos < len && cols < MAX_TABLE_COLS) {
+        if (html[pos] == '<') {
+            /* Quick tag check */
+            int p = pos + 1;
+            bool closing = false;
+            if (p < len && html[p] == '/') { closing = true; p++; }
+            char tn[8]; int ti = 0;
+            while (p < len && html[p] != '>' && html[p] != ' ' && ti < 7) {
+                char c = html[p];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                tn[ti++] = c; p++;
+            }
+            tn[ti] = '\0';
+            if (str_eq(tn, "table") && !closing) depth++;
+            if (str_eq(tn, "table") && closing) { if (depth > 0) depth--; else break; }
+            if (depth == 0) {
+                if ((str_eq(tn, "td") || str_eq(tn, "th")) && !closing) cols++;
+                if (str_eq(tn, "tr") && closing) break; /* end of first row */
+            }
+        }
+        pos++;
+    }
+    return cols > 0 ? cols : 1;
+}
+
+/* ---- Bookmark helpers ---- */
+
+static bool is_bookmarked(const char *url) {
+    for (int i = 0; i < bookmark_count; i++)
+        if (str_eq(bookmarks_list[i], url)) return true;
+    return false;
+}
+
+static void bookmark_add(const char *url) {
+    if (bookmark_count >= MAX_BOOKMARKS || is_bookmarked(url)) return;
+    str_ncopy(bookmarks_list[bookmark_count], url, ADDR_MAX);
+    bookmark_count++;
+}
+
+static void bookmark_remove(const char *url) {
+    for (int i = 0; i < bookmark_count; i++) {
+        if (str_eq(bookmarks_list[i], url)) {
+            for (int j = i; j < bookmark_count - 1; j++)
+                str_copy(bookmarks_list[j], bookmarks_list[j + 1]);
+            bookmark_count--;
+            return;
+        }
+    }
+}
+
+static void bookmark_toggle(const char *url) {
+    if (is_bookmarked(url)) bookmark_remove(url);
+    else bookmark_add(url);
+}
+
+static void bookmarks_save(void) {
+    int idx = fs_find("bookmarks.dat");
+    if (idx < 0) idx = fs_create("bookmarks.dat", FS_FILE);
+    if (idx < 0) return;
+    /* Build newline-separated list */
+    static char bm_buf[MAX_BOOKMARKS * (ADDR_MAX + 2)];
+    int blen = 0;
+    for (int i = 0; i < bookmark_count; i++) {
+        int sl = str_len(bookmarks_list[i]);
+        for (int j = 0; j < sl && blen < (int)sizeof(bm_buf) - 2; j++)
+            bm_buf[blen++] = bookmarks_list[i][j];
+        bm_buf[blen++] = '\n';
+    }
+    bm_buf[blen] = '\0';
+    fs_write_file(idx, bm_buf, blen);
+}
+
+static void bookmarks_load(void) {
+    int idx = fs_find("bookmarks.dat");
+    if (idx < 0) return;
+    struct fs_node *node = fs_get_node(idx);
+    if (!node || !node->data || node->size == 0) return;
+    const char *d = node->data;
+    int sz = (int)node->size;
+    bookmark_count = 0;
+    int start = 0;
+    for (int i = 0; i <= sz; i++) {
+        if (i == sz || d[i] == '\n') {
+            int len = i - start;
+            if (len > 0 && len <= ADDR_MAX && bookmark_count < MAX_BOOKMARKS) {
+                for (int j = 0; j < len; j++)
+                    bookmarks_list[bookmark_count][j] = d[start + j];
+                bookmarks_list[bookmark_count][len] = '\0';
+                bookmark_count++;
+            }
+            start = i + 1;
         }
     }
 }
@@ -1343,6 +1689,44 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
         return;
     }
 
+    /* Prompt modal intercepts all input */
+    if (prompt_active) {
+        if (evt->type == EVT_KEY_PRESS) {
+            uint8_t k = evt->key;
+            if (k == '\n') {
+                /* Submit prompt */
+                prompt_active = false;
+                if (prompt_target_var[0])
+                    js_set_var(prompt_target_var, prompt_input);
+            } else if (k == 0x1B) {
+                /* Cancel — set empty string */
+                prompt_active = false;
+                if (prompt_target_var[0])
+                    js_set_var(prompt_target_var, "");
+            } else if (k == '\b') {
+                if (prompt_input_len > 0)
+                    prompt_input[--prompt_input_len] = '\0';
+            } else if (k >= 0x20 && k < 0x80 && prompt_input_len < 63) {
+                prompt_input[prompt_input_len++] = (char)k;
+                prompt_input[prompt_input_len] = '\0';
+            }
+        }
+        if (evt->type == EVT_MOUSE_DOWN) {
+            int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
+            int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
+            int pw = 300, ph = 100;
+            int px_ = (BRW_W - pw) / 2;
+            int py_ = CONTENT_Y + (CONTENT_H - ph) / 2;
+            int pok_x = px_ + (pw - 48) / 2, pok_y = py_ + ph - 26;
+            if (mx >= pok_x && mx < pok_x + 48 && my >= pok_y && my < pok_y + 18) {
+                prompt_active = false;
+                if (prompt_target_var[0])
+                    js_set_var(prompt_target_var, prompt_input);
+            }
+        }
+        return;
+    }
+
     if (evt->type == EVT_KEY_PRESS) {
         uint8_t k = evt->key;
 
@@ -1350,6 +1734,10 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
         if (k == 0x14) { new_tab("home.htm"); return; }
         /* Ctrl+W = close tab (ASCII 0x17) */
         if (k == 0x17) { close_tab(active_tab); return; }
+        /* Ctrl+B = toggle bookmarks (ASCII 0x02) */
+        if (k == 0x02) { bookmarks_showing = !bookmarks_showing; return; }
+        /* Ctrl+U = toggle view source (ASCII 0x15) */
+        if (k == 0x15) { view_source_mode = !view_source_mode; return; }
 
         if (addr_focused) {
             if (k == '\n') {
@@ -1478,8 +1866,36 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
             }
             return;
         }
+        /* Toolbar: star (bookmark) button */
+        if (mx >= BRW_W - 56 && mx < BRW_W - 38 && my >= 4 && my < 22) {
+            if (T->addr_len > 0) {
+                T->addr_buf[T->addr_len] = '\0';
+                bookmark_toggle(T->addr_buf);
+                bookmarks_save();
+            }
+            return;
+        }
         /* Toolbar: address bar */
         if (mx >= ADDR_X && mx < ADDR_X + ADDR_W && my >= 4 && my < 22) { addr_focused = true; return; }
+
+        /* Bookmarks dropdown click (must be before tab bar to take priority) */
+        if (bookmarks_showing) {
+            int bx = BRW_W - 200;
+            int by = TOOLBAR_H;
+            int bw = 196;
+            int bh = bookmark_count > 0 ? bookmark_count * 18 + 8 : 26;
+            if (mx >= bx && mx < bx + bw && my >= by && my < by + bh) {
+                if (bookmark_count > 0) {
+                    int idx = (my - by - 4) / 18;
+                    if (idx >= 0 && idx < bookmark_count) {
+                        bookmarks_showing = false;
+                        load_page(T, bookmarks_list[idx]);
+                    }
+                }
+                return;
+            }
+            bookmarks_showing = false; /* Click outside closes dropdown */
+        }
 
         /* Tab bar clicks */
         if (my >= TOOLBAR_H && my < TOOLBAR_H + TAB_BAR_H) {
@@ -1508,8 +1924,30 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
             return;
         }
 
-        /* Content area: link clicks and form field clicks */
+        /* Content area: scrollbar, link clicks and form field clicks */
         if (my >= CONTENT_Y && my < CONTENT_Y + CONTENT_H) {
+            /* Scrollbar click/drag */
+            if (mx >= BRW_W - SCROLLBAR_W - 2 && T->content_total_h > CONTENT_H) {
+                int track_h = CONTENT_H - 4;
+                int thumb_h = (CONTENT_H * track_h) / T->content_total_h;
+                if (thumb_h < 14) thumb_h = 14;
+                int thumb_y = CONTENT_Y + 2 + (T->scroll_y * (track_h - thumb_h)) / (T->content_total_h - CONTENT_H);
+                if (my >= thumb_y && my < thumb_y + thumb_h) {
+                    /* Clicked on thumb — start drag */
+                    scrollbar_dragging = true;
+                    scrollbar_drag_offset = my - thumb_y;
+                } else if (my < thumb_y) {
+                    /* Clicked above thumb — page up */
+                    T->scroll_y -= CONTENT_H;
+                    if (T->scroll_y < 0) T->scroll_y = 0;
+                } else {
+                    /* Clicked below thumb — page down */
+                    T->scroll_y += CONTENT_H;
+                    int max_scroll = T->content_total_h - CONTENT_H;
+                    if (T->scroll_y > max_scroll) T->scroll_y = max_scroll;
+                }
+                return;
+            }
             int content_mx = mx;
             int content_my = my - CONTENT_Y + T->scroll_y;
 
@@ -1559,9 +1997,28 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
         }
     }
 
+    if (evt->type == EVT_MOUSE_UP) {
+        scrollbar_dragging = false;
+    }
+
     if (evt->type == EVT_MOUSE_MOVE) {
         int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
         int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
+
+        /* Scrollbar drag */
+        if (scrollbar_dragging && T->content_total_h > CONTENT_H) {
+            int track_h = CONTENT_H - 4;
+            int thumb_h = (CONTENT_H * track_h) / T->content_total_h;
+            if (thumb_h < 14) thumb_h = 14;
+            int new_thumb_y = my - scrollbar_drag_offset;
+            int min_y = CONTENT_Y + 2;
+            int max_y = CONTENT_Y + 2 + track_h - thumb_h;
+            if (new_thumb_y < min_y) new_thumb_y = min_y;
+            if (new_thumb_y > max_y) new_thumb_y = max_y;
+            T->scroll_y = ((new_thumb_y - min_y) * (T->content_total_h - CONTENT_H)) / (max_y - min_y);
+            return;
+        }
+
         T->hovered_link = -1;
         if (my >= CONTENT_Y && my < CONTENT_Y + CONTENT_H) {
             int content_mx = mx;
@@ -1591,6 +2048,9 @@ void browser_create(void) {
     tab_count = 0;
     active_tab = 0;
     for (int i = 0; i < MAX_TABS; i++) tabs[i].used = false;
+    bookmarks_load();
+    view_source_mode = false;
+    bookmarks_showing = false;
     new_tab("home.htm");
 }
 
@@ -1689,6 +2149,14 @@ void browser_render(void) {
     }
     brw_rect(buf, cw, ch, BRW_W - 36, 4, 32, 18, C_BTN_BG);
     brw_text(buf, cw, ch, BRW_W - 32, 5, "Go", C_BTN_FG, C_BTN_BG);
+    /* Star (bookmark) button */
+    {
+        bool starred = is_bookmarked(T->addr_buf);
+        color_t star_bg = starred ? COLOR_RGB(255, 210, 60) : C_BTN_BG;
+        color_t star_fg = starred ? COLOR_RGB(120, 80, 0) : C_BTN_FG;
+        brw_rect(buf, cw, ch, BRW_W - 56, 4, 18, 18, star_bg);
+        brw_text(buf, cw, ch, BRW_W - 52, 5, "*", star_fg, star_bg);
+    }
 
     /* Tab bar */
     brw_rect(buf, cw, ch, 0, TOOLBAR_H, cw, TAB_BAR_H, C_TAB_BG);
@@ -1750,7 +2218,7 @@ void browser_render(void) {
 
     int draw_x = 8;
     int draw_y = 4;
-    int max_x = BRW_W - 16;
+    int max_x = BRW_W - 16 - SCROLLBAR_W;
     int heading = 0;
     bool in_link = false;
     bool in_list = false;
@@ -1758,9 +2226,131 @@ void browser_render(void) {
     bool in_style_tag = false;
     bool last_was_space = true;
     bool line_start = true;
+    in_table = false;
+    tbl_col_idx = 0;
     char current_href[ADDR_MAX + 1];
     int link_start_x = 0, link_start_y = 0;
     current_href[0] = '\0';
+
+    /* ---- View Source mode ---- */
+    if (view_source_mode) {
+        int sx = 40; /* left margin for line numbers */
+        int sy_pos = 4;
+        int line_num = 1;
+        bool in_tag = false;
+        bool in_quote = false;
+        bool in_comment = false;
+        int cm_state = 0; /* comment detection state */
+        color_t src_bg = COLOR_RGB(35, 38, 45);
+        color_t c_linenum = COLOR_RGB(100, 110, 130);
+        color_t c_default = COLOR_RGB(210, 215, 225);
+        color_t c_tag = COLOR_RGB(90, 160, 255);
+        color_t c_string = COLOR_RGB(220, 110, 80);
+        color_t c_comment = COLOR_RGB(100, 115, 100);
+        color_t c_attr = COLOR_RGB(140, 220, 140);
+
+        /* Fill content area with dark background */
+        for (int fy = CONTENT_Y; fy < CONTENT_Y + CONTENT_H; fy++)
+            for (int fx = 0; fx < cw; fx++)
+                buf[fy * cw + fx] = src_bg;
+
+        /* Render line number for first line */
+        {
+            int screen_y = CONTENT_Y + sy_pos - T->scroll_y;
+            if (screen_y >= CONTENT_Y && screen_y + 16 <= CONTENT_Y + CONTENT_H) {
+                char ln[6]; int li = 0;
+                int n = line_num;
+                char tmp[6]; int ti = 0;
+                while (n > 0) { tmp[ti++] = '0' + (n % 10); n /= 10; }
+                if (ti == 0) tmp[ti++] = '0';
+                while (ti > 0) ln[li++] = tmp[--ti];
+                ln[li] = '\0';
+                brw_text(buf, cw, ch, 4, screen_y, ln, c_linenum, src_bg);
+            }
+        }
+
+        for (int pi = 0; pi < page_len; pi++) {
+            char c = page_buf[pi];
+            int screen_y = CONTENT_Y + sy_pos - T->scroll_y;
+
+            if (c == '\n' || c == '\r') {
+                if (c == '\r' && pi + 1 < page_len && page_buf[pi + 1] == '\n') pi++;
+                sy_pos += 16;
+                sx = 40;
+                line_num++;
+                /* Render next line number */
+                screen_y = CONTENT_Y + sy_pos - T->scroll_y;
+                if (screen_y >= CONTENT_Y && screen_y + 16 <= CONTENT_Y + CONTENT_H) {
+                    char ln[6]; int li = 0;
+                    int n = line_num;
+                    char tmp[6]; int ti = 0;
+                    while (n > 0) { tmp[ti++] = '0' + (n % 10); n /= 10; }
+                    if (ti == 0) tmp[ti++] = '0';
+                    while (ti > 0) ln[li++] = tmp[--ti];
+                    ln[li] = '\0';
+                    brw_text(buf, cw, ch, 4, screen_y, ln, c_linenum, src_bg);
+                }
+                continue;
+            }
+
+            /* Comment detection */
+            if (!in_comment && c == '<' && pi + 3 < page_len &&
+                page_buf[pi+1] == '!' && page_buf[pi+2] == '-' && page_buf[pi+3] == '-') {
+                in_comment = true; cm_state = 0;
+            }
+            if (in_comment) {
+                if (c == '-') cm_state = (cm_state < 2) ? cm_state + 1 : 2;
+                else if (c == '>' && cm_state >= 2) in_comment = false;
+                else cm_state = 0;
+            }
+
+            /* Color selection */
+            color_t ch_color;
+            if (in_comment || (in_comment == false && cm_state == 0 && c == '>' && !in_tag && !in_quote)) {
+                ch_color = c_comment;
+            } else if (in_comment) {
+                ch_color = c_comment;
+            } else if (c == '<' || c == '>') {
+                ch_color = c_tag;
+                if (c == '<') in_tag = true;
+                if (c == '>') { in_tag = false; in_quote = false; }
+            } else if (in_tag && (c == '"' || c == '\'')) {
+                in_quote = !in_quote;
+                ch_color = c_string;
+            } else if (in_quote) {
+                ch_color = c_string;
+            } else if (in_tag && c == '=') {
+                ch_color = c_default;
+            } else if (in_tag && c == ' ') {
+                ch_color = c_default;
+            } else if (in_tag) {
+                /* After first space in tag = attribute name */
+                bool after_space = false;
+                for (int bk = pi - 1; bk >= 0 && page_buf[bk] != '<'; bk--) {
+                    if (page_buf[bk] == ' ') { after_space = true; break; }
+                }
+                ch_color = after_space ? c_attr : c_tag;
+            } else {
+                ch_color = c_default;
+            }
+
+            /* Render character */
+            if (screen_y >= CONTENT_Y && screen_y + 16 <= CONTENT_Y + CONTENT_H &&
+                sx + 8 <= cw - SCROLLBAR_W) {
+                brw_char_transparent(buf, cw, ch, sx, screen_y, c, ch_color);
+            }
+            sx += 8;
+            /* Wrap long lines */
+            if (sx >= cw - SCROLLBAR_W - 8) {
+                sy_pos += 16;
+                sx = 40;
+            }
+        }
+        T->content_total_h = sy_pos + 20;
+        /* Show "View Source" in status bar */
+        str_copy(status_msg, "View Source (Ctrl+U to exit)");
+        goto render_end;
+    }
 
     int pos = 0;
     while (pos < page_len) {
@@ -1923,15 +2513,98 @@ void browser_render(void) {
                 } else if (tag_eq(tag_name, tn, "dt")) {
                     if (!closing) { draw_y += 2; draw_x = (in_list ? 16 : 8); cur_style()->bold = true; }
                     is_block = true;
-                } else if (tag_eq(tag_name, tn, "table") || tag_eq(tag_name, tn, "thead") ||
-                           tag_eq(tag_name, tn, "tbody")) {
-                    if (!closing) { draw_y += 4; draw_x = 8; } else { draw_y += 4; }
+                } else if (tag_eq(tag_name, tn, "table")) {
+                    if (!closing) {
+                        /* Count columns and set up table layout */
+                        in_table = true;
+                        tbl_col_count = count_table_columns(page_buf, pos, page_len);
+                        tbl_start_x = draw_x;
+                        tbl_width = max_x - draw_x - SCROLLBAR_W - 4;
+                        int cell_w = tbl_width / tbl_col_count;
+                        for (int ci = 0; ci < tbl_col_count; ci++) {
+                            tbl_col_x[ci] = tbl_start_x + ci * cell_w;
+                            tbl_col_w[ci] = cell_w;
+                        }
+                        tbl_col_idx = 0;
+                        tbl_row_y = draw_y;
+                        tbl_row_max_h = 16;
+                        draw_y += 2; /* top padding */
+                        /* Draw top border */
+                        int sy = CONTENT_Y + draw_y - T->scroll_y;
+                        if (sy >= CONTENT_Y && sy < CONTENT_Y + CONTENT_H)
+                            brw_rect(buf, cw, ch, tbl_start_x, sy, tbl_width, 1, C_HR);
+                        draw_y += 1;
+                    } else {
+                        /* Draw bottom border */
+                        int sy = CONTENT_Y + draw_y - T->scroll_y;
+                        if (sy >= CONTENT_Y && sy < CONTENT_Y + CONTENT_H)
+                            brw_rect(buf, cw, ch, tbl_start_x, sy, tbl_width, 1, C_HR);
+                        draw_y += 6;
+                        in_table = false;
+                        draw_x = 8;
+                    }
+                    is_block = true;
+                } else if (tag_eq(tag_name, tn, "thead") || tag_eq(tag_name, tn, "tbody")) {
                     is_block = true;
                 } else if (tag_eq(tag_name, tn, "tr")) {
-                    if (!closing) { draw_x = 8; } else { draw_y += 16; draw_x = 8; }
+                    if (!closing) {
+                        tbl_col_idx = 0;
+                        tbl_row_y = draw_y;
+                        tbl_row_max_h = 16;
+                        if (in_table) draw_x = tbl_col_x[0] + 4;
+                    } else {
+                        if (in_table) {
+                            draw_y = tbl_row_y + tbl_row_max_h + 4;
+                            /* Draw row separator */
+                            int sy = CONTENT_Y + draw_y - T->scroll_y;
+                            if (sy >= CONTENT_Y && sy < CONTENT_Y + CONTENT_H)
+                                brw_rect(buf, cw, ch, tbl_start_x, sy, tbl_width, 1, COLOR_RGB(210, 210, 215));
+                            draw_y += 1;
+                        } else {
+                            draw_y += 16;
+                        }
+                        draw_x = 8;
+                    }
                     is_block = true;
                 } else if (tag_eq(tag_name, tn, "td") || tag_eq(tag_name, tn, "th")) {
-                    if (!closing) draw_x += 8; else draw_x += 16;
+                    if (!closing) {
+                        if (in_table && tbl_col_idx < tbl_col_count) {
+                            draw_x = tbl_col_x[tbl_col_idx] + 4;
+                            draw_y = tbl_row_y;
+                            max_x = tbl_col_x[tbl_col_idx] + tbl_col_w[tbl_col_idx] - 4;
+                            /* Draw left cell border */
+                            int sy = CONTENT_Y + tbl_row_y - T->scroll_y;
+                            if (sy >= CONTENT_Y && sy + 16 < CONTENT_Y + CONTENT_H)
+                                brw_rect(buf, cw, ch, tbl_col_x[tbl_col_idx], sy, 1, 18, COLOR_RGB(210, 210, 215));
+                            /* <th> gets bold + darker bg */
+                            if (tag_eq(tag_name, tn, "th")) {
+                                cur_style()->bold = true;
+                                int bsy = CONTENT_Y + tbl_row_y - T->scroll_y;
+                                if (bsy >= CONTENT_Y && bsy + 16 < CONTENT_Y + CONTENT_H)
+                                    brw_rect(buf, cw, ch, tbl_col_x[tbl_col_idx] + 1, bsy,
+                                             tbl_col_w[tbl_col_idx] - 1, 18, COLOR_RGB(230, 232, 238));
+                            }
+                        } else {
+                            draw_x += 8;
+                        }
+                    } else {
+                        if (in_table) {
+                            /* Track max height for this row */
+                            int cell_h = draw_y - tbl_row_y + 16;
+                            if (cell_h > tbl_row_max_h) tbl_row_max_h = cell_h;
+                            tbl_col_idx++;
+                            /* Draw right border of last column */
+                            if (tbl_col_idx >= tbl_col_count) {
+                                int sy = CONTENT_Y + tbl_row_y - T->scroll_y;
+                                if (sy >= CONTENT_Y && sy + 16 < CONTENT_Y + CONTENT_H)
+                                    brw_rect(buf, cw, ch, tbl_start_x + tbl_width - 1, sy, 1, 18, COLOR_RGB(210, 210, 215));
+                            }
+                            /* Restore max_x for next cell */
+                            max_x = BRW_W - 16 - SCROLLBAR_W;
+                        } else {
+                            draw_x += 16;
+                        }
+                    }
                 } else if (tag_eq(tag_name, tn, "input") && !closing) {
                     /* Self-closing: create form field */
                     if (T->form_field_count < MAX_FORM_FIELDS) {
@@ -2583,6 +3256,7 @@ void browser_render(void) {
 
     /* Scroll clamping */
     T->content_total_h = draw_y + 20;
+render_end:
     if (T->scroll_y > T->content_total_h - CONTENT_H) {
         if (T->content_total_h > CONTENT_H)
             T->scroll_y = T->content_total_h - CONTENT_H;
@@ -2598,10 +3272,34 @@ void browser_render(void) {
     if (T->content_total_h > CONTENT_H) {
         int track_h = CONTENT_H - 4;
         int thumb_h = (CONTENT_H * track_h) / T->content_total_h;
-        if (thumb_h < 10) thumb_h = 10;
+        if (thumb_h < 14) thumb_h = 14;
         int thumb_y = CONTENT_Y + 2 + (T->scroll_y * (track_h - thumb_h)) / (T->content_total_h - CONTENT_H);
-        brw_rect(buf, cw, ch, BRW_W - 6, CONTENT_Y + 2, 4, track_h, COLOR_RGB(210, 210, 215));
-        brw_rect(buf, cw, ch, BRW_W - 6, thumb_y, 4, thumb_h, COLOR_RGB(160, 160, 170));
+        /* Track */
+        brw_rect(buf, cw, ch, BRW_W - SCROLLBAR_W - 2, CONTENT_Y, SCROLLBAR_W + 2, CONTENT_H, COLOR_RGB(235, 235, 238));
+        /* Thumb with border */
+        brw_rect(buf, cw, ch, BRW_W - SCROLLBAR_W - 1, thumb_y, SCROLLBAR_W, thumb_h, COLOR_RGB(160, 162, 170));
+        brw_rect(buf, cw, ch, BRW_W - SCROLLBAR_W - 1, thumb_y, SCROLLBAR_W, 1, COLOR_RGB(140, 142, 150));
+        brw_rect(buf, cw, ch, BRW_W - SCROLLBAR_W - 1, thumb_y + thumb_h - 1, SCROLLBAR_W, 1, COLOR_RGB(140, 142, 150));
+    }
+
+    /* Bookmarks dropdown */
+    if (bookmarks_showing) {
+        int bx = BRW_W - 200;
+        int by = TOOLBAR_H;
+        int bw = 196;
+        int bh = bookmark_count > 0 ? bookmark_count * 18 + 8 : 26;
+        /* Shadow + background */
+        brw_rect(buf, cw, ch, bx + 2, by + 2, bw, bh, COLOR_RGB(100, 100, 110));
+        brw_rect(buf, cw, ch, bx, by, bw, bh, COLOR_RGB(255, 255, 255));
+        brw_rect(buf, cw, ch, bx, by, bw, 1, COLOR_RGB(180, 180, 185));
+        if (bookmark_count == 0) {
+            brw_text(buf, cw, ch, bx + 8, by + 5, "No bookmarks", COLOR_RGB(150, 150, 150), COLOR_WHITE);
+        } else {
+            for (int i = 0; i < bookmark_count; i++) {
+                int iy = by + 4 + i * 18;
+                brw_text(buf, cw, ch, bx + 8, iy, bookmarks_list[i], C_LINK, COLOR_WHITE);
+            }
+        }
     }
 
     /* Alert overlay */
@@ -2650,5 +3348,42 @@ void browser_render(void) {
         /* Store OK button coords for click detection */
         alert_ok_x = ok_x; alert_ok_y = ok_y;
         alert_ok_w = ok_w; alert_ok_h = ok_h;
+    }
+
+    /* Prompt modal overlay */
+    if (prompt_active) {
+        /* Darken */
+        for (int py = CONTENT_Y; py < BRW_H - STATUS_H; py++)
+            for (int px = 0; px < cw; px++)
+                if ((px + py) & 1) buf[py * cw + px] = COLOR_RGB(0, 0, 0);
+        int pw = 300, ph = 100;
+        int px_ = (BRW_W - pw) / 2;
+        int py_ = CONTENT_Y + (CONTENT_H - ph) / 2;
+        brw_rect(buf, cw, ch, px_, py_, pw, ph, COLOR_WHITE);
+        brw_rect(buf, cw, ch, px_, py_, pw, 2, COLOR_RGB(60, 100, 60));
+        brw_rect(buf, cw, ch, px_, py_ + ph - 2, pw, 2, COLOR_RGB(60, 100, 60));
+        brw_rect(buf, cw, ch, px_, py_, 2, ph, COLOR_RGB(60, 100, 60));
+        brw_rect(buf, cw, ch, px_ + pw - 2, py_, 2, ph, COLOR_RGB(60, 100, 60));
+        /* Title */
+        brw_rect(buf, cw, ch, px_ + 2, py_ + 2, pw - 4, 18, COLOR_RGB(60, 100, 60));
+        brw_text(buf, cw, ch, px_ + 8, py_ + 3, "Prompt", COLOR_WHITE, COLOR_RGB(60, 100, 60));
+        /* Message */
+        brw_text(buf, cw, ch, px_ + 12, py_ + 24, prompt_message, COLOR_RGB(30, 30, 30), COLOR_WHITE);
+        /* Input field */
+        int ix = px_ + 12, iy = py_ + 44, iw = pw - 24;
+        brw_rect(buf, cw, ch, ix, iy, iw, 20, COLOR_RGB(255, 255, 255));
+        brw_rect(buf, cw, ch, ix, iy, iw, 1, COLOR_RGB(160, 160, 160));
+        brw_rect(buf, cw, ch, ix, iy + 19, iw, 1, COLOR_RGB(160, 160, 160));
+        brw_rect(buf, cw, ch, ix, iy, 1, 20, COLOR_RGB(160, 160, 160));
+        brw_rect(buf, cw, ch, ix + iw - 1, iy, 1, 20, COLOR_RGB(160, 160, 160));
+        brw_text(buf, cw, ch, ix + 4, iy + 2, prompt_input, COLOR_RGB(30, 30, 30), COLOR_WHITE);
+        /* Cursor */
+        if ((timer_get_ticks() / 40) & 1)
+            brw_rect(buf, cw, ch, ix + 4 + prompt_input_len * 8, iy + 2, 2, 16, COLOR_RGB(0, 80, 200));
+        /* OK button */
+        int pok_x = px_ + (pw - 48) / 2, pok_y = py_ + ph - 26;
+        brw_rect(buf, cw, ch, pok_x, pok_y, 48, 18, C_BTN_BG);
+        brw_rect(buf, cw, ch, pok_x, pok_y, 48, 1, COLOR_RGB(160, 160, 170));
+        brw_text(buf, cw, ch, pok_x + 12, pok_y + 1, "OK", C_BTN_FG, C_BTN_BG);
     }
 }

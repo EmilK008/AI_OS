@@ -114,7 +114,8 @@ void fs_init_defaults(void) {
             "<p>Links: <a href=\"readme.txt\">readme.txt</a> | "
             "<a href=\"demo.htm\">demo page</a> | "
             "<a href=\"features.htm\">features demo</a> | "
-            "<a href=\"jsdemo.htm\">JS demo</a></p>"
+            "<a href=\"jsdemo.htm\">JS demo</a> | "
+            "<a href=\"tabledemo.htm\">tables demo</a></p>"
             "<!-- Navigation hints -->"
             "<p>Scroll: PgUp/PgDn | Back: Backspace</p>"
             "<p>Tabs: Ctrl+T new | Ctrl+W close</p>";
@@ -261,8 +262,56 @@ void fs_init_defaults(void) {
             "function calls, variables</p>"
             "</div>"
             "<p><a href=\"home.htm\">Home</a> | "
-            "<a href=\"features.htm\">Features</a></p>";
+            "<a href=\"features.htm\">Features</a> | "
+            "<a href=\"tabledemo.htm\">Tables</a></p>";
         fs_write_file(jsdemo, htm, str_len(htm));
+    }
+
+    /* Table demo page */
+    int tabledemo = fs_create("tabledemo.htm", FS_FILE);
+    if (tabledemo >= 0) {
+        const char *htm =
+            "<style>"
+            "h1 { color: navy; text-align: center; }"
+            "h2 { color: teal; }"
+            "</style>"
+            "<h1>Table Demo</h1>"
+            "<h2>File System</h2>"
+            "<table>"
+            "<tr><th>Name</th><th>Type</th><th>Size</th></tr>"
+            "<tr><td>home.htm</td><td>HTML</td><td>1.2K</td></tr>"
+            "<tr><td>demo.htm</td><td>HTML</td><td>890B</td></tr>"
+            "<tr><td>readme.txt</td><td>Text</td><td>256B</td></tr>"
+            "<tr><td>bookmarks.dat</td><td>Data</td><td>64B</td></tr>"
+            "</table>"
+            "<h2>Colors</h2>"
+            "<table>"
+            "<tr><th>Color</th><th>Hex</th><th>Use</th></tr>"
+            "<tr><td>Red</td><td>#FF0000</td><td>Errors</td></tr>"
+            "<tr><td>Green</td><td>#00FF00</td><td>Success</td></tr>"
+            "<tr><td>Blue</td><td>#0000FF</td><td>Links</td></tr>"
+            "</table>"
+            "<hr>"
+            "<h2>Interactive JS Demo</h2>"
+            "<script>"
+            "function askName() {"
+            "  var name = prompt('What is your name?');"
+            "  if (name) { alert('Hello ' + name + '!'); }"
+            "  else { alert('No name entered'); }"
+            "}"
+            "function counter() {"
+            "  count = '1';"
+            "  alert('Count: ' + count);"
+            "}"
+            "</script>"
+            "<p><button onclick=\"askName()\">Ask Name</button> "
+            "<button onclick=\"counter()\">Count</button></p>"
+            "<p>Try: Ctrl+U = view source | Ctrl+B = bookmarks | * = star page</p>"
+            "<hr>"
+            "<p><a href=\"home.htm\">Home</a> | "
+            "<a href=\"jsdemo.htm\">JS Demo</a> | "
+            "<a href=\"features.htm\">Features</a></p>";
+        fs_write_file(tabledemo, htm, str_len(htm));
     }
 }
 

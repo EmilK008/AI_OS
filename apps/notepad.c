@@ -212,7 +212,7 @@ static bool html_void_tag(const char *tag) {
 }
 
 /* Attribute database: tag -> attributes */
-#define HTML_ATTR_COUNT 28
+#define HTML_ATTR_COUNT 33
 static const struct {
     const char *tag;  /* NULL = generic (applies to all) */
     const char *attr;
@@ -223,6 +223,7 @@ static const struct {
     { "img",      "alt"         },
     { "img",      "width"       },
     { "img",      "height"      },
+    { "img",      "fit"         },
     { "link",     "rel"         },
     { "link",     "href"        },
     { "link",     "type"        },
@@ -236,6 +237,8 @@ static const struct {
     { "form",     "action"      },
     { "form",     "method"      },
     { "button",   "type"        },
+    { "button",   "onclick"     },
+    { "input",    "onclick"     },
     { "label",    "for"         },
     { "textarea", "rows"        },
     { "textarea", "cols"        },

@@ -154,6 +154,8 @@ void keyboard_handler(void) {
                 else if (c == 'z' || c == 'Z') c = 26;  /* SUB - Ctrl+Z */
                 else if (c == 'y' || c == 'Y') c = 25;  /* EM  - Ctrl+Y */
                 else if (c == 'r' || c == 'R') c = 18;  /* DC2 - Ctrl+R */
+                else if (c == 'b' || c == 'B') c = 2;   /* STX - Ctrl+B */
+                else if (c == 'u' || c == 'U') c = 21;  /* NAK - Ctrl+U */
             }
 
             if (c != 0) {
