@@ -455,20 +455,43 @@ static void ac_accept(void) {
    after the last unmatched '<'. Returns the tag name in out, or empty. */
 static void ac_find_tag_context(char *out, int max) {
     out[0] = '\0';
+    /* Scan backwards from cursor, skipping over any attr="value" pairs,
+       to find the opening '<tagname'. */
     int i = cursor_pos - 1;
-    while (i >= 0 && text_buf[i] == ' ') i--;
-    int end = i + 1;
-    while (i >= 0 && text_buf[i] != '<' && text_buf[i] != '>' && text_buf[i] != ' ') i--;
+    while (i >= 0 && text_buf[i] == ' ') i--; /* skip trailing spaces */
+    /* Skip backwards over attribute="value" pairs */
+    while (i >= 0 && text_buf[i] != '<' && text_buf[i] != '>') {
+        if (text_buf[i] == '"') {
+            /* Inside a quoted value — skip to opening quote */
+            i--;
+            while (i >= 0 && text_buf[i] != '"') i--;
+            if (i >= 0) i--; /* skip opening quote */
+            /* Skip the = sign */
+            while (i >= 0 && text_buf[i] == ' ') i--;
+            if (i >= 0 && text_buf[i] == '=') i--;
+            /* Skip attribute name */
+            while (i >= 0 && text_buf[i] != ' ' && text_buf[i] != '<' && text_buf[i] != '>') i--;
+        } else if (text_buf[i] == ' ') {
+            i--;
+        } else {
+            /* Could be a bare attribute name (no value yet) — skip it */
+            while (i >= 0 && text_buf[i] != ' ' && text_buf[i] != '<' && text_buf[i] != '>') i--;
+        }
+    }
     if (i >= 0 && text_buf[i] == '<') {
         int start = i + 1;
+        /* Find end of tag name */
+        int end = start;
+        while (end < cursor_pos && text_buf[end] != ' ' && text_buf[end] != '>' && text_buf[end] != '/') end++;
         int len = end - start;
-        if (len > max - 1) len = max - 1;
-        for (int j = 0; j < len; j++) {
-            char c = text_buf[start + j];
-            if (c >= 'A' && c <= 'Z') c += 32;
-            out[j] = c;
+        if (len > 0 && len < max) {
+            for (int j = 0; j < len; j++) {
+                char c = text_buf[start + j];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                out[j] = c;
+            }
+            out[len] = '\0';
         }
-        out[len] = '\0';
     }
 }
 
