@@ -129,21 +129,6 @@ static void net_dbg(const char *s) {
         __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)*s++), "Nd"((uint16_t)0xE9));
 }
 
-static void net_dbg_dec(uint32_t v) {
-    char buf[12];
-    int i = 0;
-    if (v == 0) { net_dbg("0"); return; }
-    while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
-    while (i-- > 0)
-        __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)buf[i]), "Nd"((uint16_t)0xE9));
-}
-
-static void net_dbg_hex8(uint8_t v) {
-    const char hex[] = "0123456789ABCDEF";
-    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)hex[v >> 4]), "Nd"((uint16_t)0xE9));
-    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)hex[v & 0xF]), "Nd"((uint16_t)0xE9));
-}
-
 /* ---- Checksum ---- */
 
 static uint16_t checksum(const void *data, uint16_t len) {
@@ -404,7 +389,6 @@ static void net_handle_ipv4(const void *data, uint16_t len) {
     } else if (ip->protocol == IP_PROTO_UDP) {
         net_handle_udp(ip->src_ip, payload, payload_len);
     } else if (ip->protocol == 6) {
-        net_dbg("IPv4: TCP packet received\n");
         net_handle_tcp(ip->src_ip, payload, payload_len);
     }
 }
@@ -925,19 +909,6 @@ static int tcp_send_packet(uint8_t flags, const void *data, uint16_t data_len) {
 
     th->checksum = tcp_checksum(pkt + 20, tcp_total, config.ip, tcp.remote_ip);
 
-    /* Debug: dump IP+TCP header */
-    if (flags & TCP_SYN) {
-        net_dbg("TCP SYN pkt (");
-        net_dbg_dec(20 + tcp_total);
-        net_dbg(" bytes):\n");
-        for (uint16_t i = 0; i < 20 + tcp_total; i++) {
-            net_dbg_hex8(pkt[i]);
-            net_dbg(" ");
-            if ((i & 15) == 15) net_dbg("\n");
-        }
-        net_dbg("\n");
-    }
-
     /* Send directly via Ethernet using cached MAC — avoids blocking ARP in ISR context */
     return net_send_ethernet(tcp.remote_mac, ETH_TYPE_IPV4, pkt, 20 + tcp_total);
 }
@@ -966,9 +937,6 @@ int net_tcp_connect(uint32_t ip, uint16_t port) {
 
     /* Send SYN */
     tcp.state = TCP_STATE_SYN_SENT;
-    net_dbg("TCP: sending SYN to port ");
-    net_dbg_dec(port);
-    net_dbg("\n");
     tcp_send_packet(TCP_SYN, NULL, 0);
     tcp.seq++;  /* SYN consumes one sequence number */
 
@@ -1035,12 +1003,6 @@ void net_tcp_close(void) {
 }
 
 static void net_handle_tcp(uint32_t src_ip, const void *data, uint16_t len) {
-    net_dbg("TCP RX: len=");
-    net_dbg_dec(len);
-    net_dbg(" state=");
-    net_dbg_dec(tcp.state);
-    net_dbg("\n");
-
     if (len < 20) return;
     const struct tcp_header *th = (const struct tcp_header *)data;
 
@@ -1049,16 +1011,7 @@ static void net_handle_tcp(uint32_t src_ip, const void *data, uint16_t len) {
 
     /* Must match our connection */
     if (src_ip != tcp.remote_ip || src_port != tcp.remote_port ||
-        dst_port != tcp.local_port) {
-        net_dbg("TCP: no match sp=");
-        net_dbg_dec(src_port);
-        net_dbg(" dp=");
-        net_dbg_dec(dst_port);
-        net_dbg(" lp=");
-        net_dbg_dec(tcp.local_port);
-        net_dbg("\n");
-        return;
-    }
+        dst_port != tcp.local_port) return;
 
     uint32_t seq = ntohl(th->seq_num);
     uint32_t ack = ntohl(th->ack_num);
