@@ -223,8 +223,9 @@ void rtl8139_handler(void) {
     outw(io_base + REG_ISR, status);
 
     if (status & INT_ROK) {
-        /* Process received packets */
-        while (!(inb(io_base + REG_CMD) & 0x01)) {  /* Buffer not empty */
+        /* Process received packets (limit iterations to prevent infinite loop) */
+        int max_packets = 64;
+        while (!(inb(io_base + REG_CMD) & 0x01) && max_packets-- > 0) {  /* Buffer not empty */
             /* RTL8139 Rx packet header: 4 bytes (status[16] + length[16]) */
             uint32_t *header = (uint32_t *)(rx_buffer + rx_offset);
             uint16_t rx_status = (uint16_t)(*header & 0xFFFF);

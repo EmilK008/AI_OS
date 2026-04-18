@@ -10,6 +10,7 @@
 #include "string.h"
 #include "keyboard.h"
 #include "timer.h"
+#include "net.h"
 
 #define BRW_W       500
 #define BRW_H       360
@@ -22,7 +23,7 @@
 /* Address bar */
 #define ADDR_X      74
 #define ADDR_W      (BRW_W - ADDR_X - 60)  /* room for star + Go buttons */
-#define ADDR_MAX    30
+#define ADDR_MAX    128
 
 /* Default colors */
 #define C_BG        COLOR_RGB(245, 245, 240)
@@ -1521,6 +1522,26 @@ static void bookmarks_load(void) {
 
 /* ---- Page loading ---- */
 
+/* Fetch page content from filesystem or HTTP */
+static int fetch_content(const char *url, char *buf, int max_size) {
+    if (str_starts_with(url, "http://")) {
+        if (!net_is_up()) return -1;
+        struct net_config *cfg = net_get_config();
+        if (!cfg->configured) return -1;
+        return net_http_get(url, buf, max_size);
+    }
+    /* Local filesystem */
+    int idx = fs_find(url);
+    if (idx < 0) return -1;
+    struct fs_node *f = fs_get_node(idx);
+    if (!f || f->type != FS_FILE || !f->data) return -1;
+    int len = (int)f->size;
+    if (len > max_size - 1) len = max_size - 1;
+    mem_copy(buf, f->data, (uint32_t)len);
+    buf[len] = '\0';
+    return len;
+}
+
 static void load_page(struct browser_tab *tab, const char *filename) {
     if (tab->addr_len > 0 && tab->history_count < HISTORY_MAX) {
         str_copy(tab->history[tab->history_count], tab->addr_buf);
@@ -1533,9 +1554,17 @@ static void load_page(struct browser_tab *tab, const char *filename) {
     tab->addr_buf[i] = '\0';
     tab->addr_len = i;
 
-    int idx = fs_find(filename);
-    if (idx < 0) {
-        const char *err = "<h1>File Not Found</h1><p>Could not find: ";
+    /* Show loading status for HTTP */
+    if (str_starts_with(filename, "http://"))
+        str_copy(status_msg, "Loading...");
+
+    int result = fetch_content(filename, tab->page_buf, PAGE_BUF_SIZE);
+    if (result < 0) {
+        const char *err;
+        if (str_starts_with(filename, "http://"))
+            err = "<h1>Network Error</h1><p>Could not fetch: ";
+        else
+            err = "<h1>File Not Found</h1><p>Could not find: ";
         int elen = str_len(err);
         mem_copy(tab->page_buf, err, (uint32_t)elen);
         int pos = elen;
@@ -1545,17 +1574,7 @@ static void load_page(struct browser_tab *tab, const char *filename) {
         tab->page_buf[pos++] = 'p'; tab->page_buf[pos++] = '>';
         tab->page_len = pos;
     } else {
-        struct fs_node *f = fs_get_node(idx);
-        if (!f || f->type != FS_FILE || !f->data) {
-            const char *err = "<h1>Error</h1><p>Cannot read file.</p>";
-            tab->page_len = str_len(err);
-            mem_copy(tab->page_buf, err, (uint32_t)tab->page_len);
-        } else {
-            int len = (int)f->size;
-            if (len > PAGE_BUF_SIZE - 1) len = PAGE_BUF_SIZE - 1;
-            mem_copy(tab->page_buf, f->data, (uint32_t)len);
-            tab->page_len = len;
-        }
+        tab->page_len = result;
     }
     tab->page_buf[tab->page_len] = '\0';
 
@@ -1583,17 +1602,11 @@ static void navigate_back(struct browser_tab *tab) {
     tab->addr_buf[i] = '\0';
     tab->addr_len = i;
 
-    int idx = fs_find(filename);
-    if (idx >= 0) {
-        struct fs_node *f = fs_get_node(idx);
-        if (f && f->type == FS_FILE && f->data) {
-            int len = (int)f->size;
-            if (len > PAGE_BUF_SIZE - 1) len = PAGE_BUF_SIZE - 1;
-            mem_copy(tab->page_buf, f->data, (uint32_t)len);
-            tab->page_len = len;
-            tab->page_buf[tab->page_len] = '\0';
-        }
+    {
+        int result = fetch_content(filename, tab->page_buf, PAGE_BUF_SIZE);
+        if (result >= 0) tab->page_len = result;
     }
+    tab->page_buf[tab->page_len] = '\0';
     extract_and_parse_styles(tab);
     parse_script_blocks(tab);
     tab->scroll_y = 0;
@@ -1618,17 +1631,11 @@ static void navigate_forward(struct browser_tab *tab) {
     tab->addr_buf[i] = '\0';
     tab->addr_len = i;
 
-    int idx = fs_find(filename);
-    if (idx >= 0) {
-        struct fs_node *f = fs_get_node(idx);
-        if (f && f->type == FS_FILE && f->data) {
-            int len = (int)f->size;
-            if (len > PAGE_BUF_SIZE - 1) len = PAGE_BUF_SIZE - 1;
-            mem_copy(tab->page_buf, f->data, (uint32_t)len);
-            tab->page_len = len;
-            tab->page_buf[tab->page_len] = '\0';
-        }
+    {
+        int result = fetch_content(filename, tab->page_buf, PAGE_BUF_SIZE);
+        if (result >= 0) tab->page_len = result;
     }
+    tab->page_buf[tab->page_len] = '\0';
     extract_and_parse_styles(tab);
     parse_script_blocks(tab);
     tab->scroll_y = 0;

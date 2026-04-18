@@ -4,7 +4,7 @@
 #include "types.h"
 
 #define MAX_PROCESSES 16
-#define PROC_STACK_SIZE 4096
+#define PROC_STACK_SIZE 16384
 
 /* Process states */
 #define PROC_UNUSED  0

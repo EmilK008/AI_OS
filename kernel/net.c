@@ -129,6 +129,21 @@ static void net_dbg(const char *s) {
         __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)*s++), "Nd"((uint16_t)0xE9));
 }
 
+static void net_dbg_dec(uint32_t v) {
+    char buf[12];
+    int i = 0;
+    if (v == 0) { net_dbg("0"); return; }
+    while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
+    while (i-- > 0)
+        __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)buf[i]), "Nd"((uint16_t)0xE9));
+}
+
+static void net_dbg_hex8(uint8_t v) {
+    const char hex[] = "0123456789ABCDEF";
+    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)hex[v >> 4]), "Nd"((uint16_t)0xE9));
+    __asm__ __volatile__("outb %0, %1" : : "a"((uint8_t)hex[v & 0xF]), "Nd"((uint16_t)0xE9));
+}
+
 /* ---- Checksum ---- */
 
 static uint16_t checksum(const void *data, uint16_t len) {
@@ -197,7 +212,7 @@ void net_format_ip(uint32_t ip, char *buf) {
 
 static int net_send_ethernet(const uint8_t dst[6], uint16_t ethertype,
                              const void *payload, uint16_t payload_len) {
-    uint8_t frame[1514];
+    static uint8_t frame[1514];
     if (payload_len > 1500) return -1;
 
     struct eth_header *eth = (struct eth_header *)frame;
@@ -327,7 +342,7 @@ static void net_handle_arp(const void *data, uint16_t len) {
 /* ---- IPv4 ---- */
 
 int net_send_ipv4(uint32_t dst_ip, uint8_t protocol, const void *payload, uint16_t len) {
-    uint8_t pkt[1500];
+    static uint8_t pkt[1500];
     if (len > 1500 - 20) return -1;
 
     struct ipv4_header *ip = (struct ipv4_header *)pkt;
@@ -370,6 +385,8 @@ int net_send_ipv4(uint32_t dst_ip, uint8_t protocol, const void *payload, uint16
 
 static void net_handle_icmp(uint32_t src_ip, const void *data, uint16_t len);
 static void net_handle_udp(uint32_t src_ip, const void *data, uint16_t len);
+static void net_handle_dns(const uint8_t *data, uint16_t len);
+static void net_handle_tcp(uint32_t src_ip, const void *data, uint16_t len);
 
 static void net_handle_ipv4(const void *data, uint16_t len) {
     if (len < 20) return;
@@ -386,6 +403,9 @@ static void net_handle_ipv4(const void *data, uint16_t len) {
         net_handle_icmp(ip->src_ip, payload, payload_len);
     } else if (ip->protocol == IP_PROTO_UDP) {
         net_handle_udp(ip->src_ip, payload, payload_len);
+    } else if (ip->protocol == 6) {
+        net_dbg("IPv4: TCP packet received\n");
+        net_handle_tcp(ip->src_ip, payload, payload_len);
     }
 }
 
@@ -437,7 +457,7 @@ static void net_handle_icmp(uint32_t src_ip, const void *data, uint16_t len) {
         }
     } else if (icmp->type == 8 && config.ip != 0) {
         /* Echo request — send reply */
-        uint8_t reply[1500];
+        static uint8_t reply[1500];
         if (len > 1480) return;
         mem_copy(reply, data, len);
         struct icmp_header *r = (struct icmp_header *)reply;
@@ -452,7 +472,7 @@ static void net_handle_icmp(uint32_t src_ip, const void *data, uint16_t len) {
 
 int net_send_udp(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port,
                  const void *data, uint16_t len) {
-    uint8_t pkt[1480];
+    static uint8_t pkt[1480];
     if (len > 1480 - 8) return -1;
 
     struct udp_header *udp = (struct udp_header *)pkt;
@@ -527,6 +547,11 @@ static void net_handle_udp(uint32_t src_ip, const void *data, uint16_t len) {
         /* Parse options (after 240-byte fixed header) */
         if (payload_len > 240)
             dhcp_parse_options(dhcp->options, payload_len - 240);
+    } else if (dst_port == 1053) {
+        /* DNS response */
+        const uint8_t *payload = (const uint8_t *)data + 8;
+        uint16_t payload_len = udp_len - 8;
+        net_handle_dns(payload, payload_len);
     }
 }
 
@@ -565,7 +590,7 @@ static void dhcp_send(uint8_t msg_type, uint32_t requested_ip, uint32_t server_i
 
     /* DHCP must be sent as broadcast at both IP and Ethernet level */
     /* Build UDP+IP manually since we might not have an IP yet */
-    uint8_t pkt[600];
+    static uint8_t pkt[600];
     struct ipv4_header *ip = (struct ipv4_header *)pkt;
     uint16_t udp_total = 8 + sizeof(dhcp);
     uint16_t ip_total = 20 + udp_total;
@@ -650,6 +675,597 @@ bool net_dhcp_discover(void) {
 
     net_dbg("DHCP: configured\n");
     return true;
+}
+
+/* ---- DNS ---- */
+
+struct dns_header {
+    uint16_t id;
+    uint16_t flags;
+    uint16_t qdcount;
+    uint16_t ancount;
+    uint16_t nscount;
+    uint16_t arcount;
+} __attribute__((packed));
+
+static volatile bool dns_reply_received;
+static volatile uint32_t dns_resolved_ip;
+static volatile uint16_t dns_reply_id;
+
+static uint16_t dns_current_id;
+
+/* Encode hostname into DNS wire format: "example.com" -> "\7example\3com\0" */
+static int dns_encode_name(const char *name, uint8_t *out) {
+    int pos = 0;
+    while (*name) {
+        int label_pos = pos++;
+        int label_len = 0;
+        while (*name && *name != '.') {
+            out[pos++] = (uint8_t)*name++;
+            label_len++;
+        }
+        out[label_pos] = (uint8_t)label_len;
+        if (*name == '.') name++;
+    }
+    out[pos++] = 0;  /* Root label */
+    return pos;
+}
+
+bool net_dns_resolve(const char *hostname, uint32_t *ip_out) {
+    if (!config.configured || config.dns == 0) return false;
+
+    static uint8_t pkt[512];
+    mem_set(pkt, 0, 512);
+
+    dns_current_id = (uint16_t)(timer_get_ticks() & 0xFFFF);
+    dns_reply_received = false;
+
+    struct dns_header *dns = (struct dns_header *)pkt;
+    dns->id = htons(dns_current_id);
+    dns->flags = htons(0x0100);  /* Standard query, recursion desired */
+    dns->qdcount = htons(1);
+
+    /* Encode question */
+    int qpos = sizeof(struct dns_header);
+    qpos += dns_encode_name(hostname, pkt + qpos);
+    /* QTYPE = A (1), QCLASS = IN (1) */
+    pkt[qpos++] = 0; pkt[qpos++] = 1;
+    pkt[qpos++] = 0; pkt[qpos++] = 1;
+
+    net_send_udp(config.dns, 1053, 53, pkt, (uint16_t)qpos);
+
+    /* Wait for reply */
+    uint32_t start = timer_get_ticks();
+    while (timer_get_ticks() - start < 300) {
+        if (dns_reply_received && dns_reply_id == dns_current_id) {
+            *ip_out = dns_resolved_ip;
+            return true;
+        }
+        __asm__ __volatile__("hlt");
+    }
+    return false;
+}
+
+static void net_handle_dns(const uint8_t *data, uint16_t len) {
+    if (len < sizeof(struct dns_header)) return;
+    const struct dns_header *dns = (const struct dns_header *)data;
+
+    uint16_t id = ntohs(dns->id);
+    uint16_t ancount = ntohs(dns->ancount);
+    if (ancount == 0) return;
+
+    /* Skip question section */
+    int pos = sizeof(struct dns_header);
+    uint16_t qdcount = ntohs(dns->qdcount);
+    for (uint16_t q = 0; q < qdcount && pos < len; q++) {
+        while (pos < len && data[pos] != 0) {
+            if ((data[pos] & 0xC0) == 0xC0) { pos += 2; goto qskipped; }
+            pos += data[pos] + 1;
+        }
+        pos++;  /* Skip null terminator */
+        qskipped:
+        pos += 4;  /* Skip QTYPE + QCLASS */
+    }
+
+    /* Parse answer records */
+    for (uint16_t a = 0; a < ancount && pos + 12 <= len; a++) {
+        /* Skip name (possibly compressed) */
+        if ((data[pos] & 0xC0) == 0xC0) {
+            pos += 2;
+        } else {
+            while (pos < len && data[pos] != 0) pos += data[pos] + 1;
+            pos++;
+        }
+
+        if (pos + 10 > len) break;
+        uint16_t rtype = ((uint16_t)data[pos] << 8) | data[pos + 1];
+        uint16_t rdlen = ((uint16_t)data[pos + 8] << 8) | data[pos + 9];
+        pos += 10;
+
+        if (rtype == 1 && rdlen == 4 && pos + 4 <= len) {
+            /* A record — IPv4 address */
+            dns_resolved_ip = bytes_to_ip(&data[pos]);
+            dns_reply_id = id;
+            dns_reply_received = true;
+            return;
+        }
+        pos += rdlen;
+    }
+}
+
+/* ---- TCP ---- */
+
+#define TCP_STATE_CLOSED     0
+#define TCP_STATE_SYN_SENT   1
+#define TCP_STATE_ESTABLISHED 2
+#define TCP_STATE_FIN_WAIT1  3
+#define TCP_STATE_FIN_WAIT2  4
+#define TCP_STATE_CLOSING    5
+#define TCP_STATE_TIME_WAIT  6
+
+struct tcp_header {
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint32_t seq_num;
+    uint32_t ack_num;
+    uint8_t  data_offset;  /* Upper 4 bits = header length in 32-bit words */
+    uint8_t  flags;
+    uint16_t window;
+    uint16_t checksum;
+    uint16_t urgent_ptr;
+} __attribute__((packed));
+
+#define TCP_FIN  0x01
+#define TCP_SYN  0x02
+#define TCP_RST  0x04
+#define TCP_PSH  0x08
+#define TCP_ACK  0x10
+
+/* TCP pseudo-header for checksum */
+struct tcp_pseudo {
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint8_t  zero;
+    uint8_t  protocol;
+    uint16_t tcp_len;
+} __attribute__((packed));
+
+/* Single TCP connection state */
+static struct {
+    int      state;
+    uint32_t remote_ip;
+    uint16_t local_port;
+    uint16_t remote_port;
+    uint32_t seq;        /* Our next sequence number */
+    uint32_t ack;        /* Next expected byte from remote */
+    uint32_t initial_seq;
+    uint8_t  remote_mac[6]; /* Cached next-hop MAC (resolved at connect time) */
+
+    /* Receive buffer */
+    uint8_t  rx_buf[16384];
+    volatile uint16_t rx_len;
+    volatile bool rx_fin;
+} tcp;
+
+static uint16_t tcp_checksum(const void *tcp_data, uint16_t tcp_len,
+                             uint32_t src_ip, uint32_t dst_ip) {
+    /* Build pseudo-header as raw bytes to avoid struct layout issues */
+    uint8_t pseudo[12];
+    mem_copy(&pseudo[0], &src_ip, 4);
+    mem_copy(&pseudo[4], &dst_ip, 4);
+    pseudo[8] = 0;
+    pseudo[9] = 6;  /* TCP protocol */
+    pseudo[10] = (uint8_t)(tcp_len >> 8);
+    pseudo[11] = (uint8_t)(tcp_len & 0xFF);
+
+    uint32_t sum = 0;
+
+    /* Sum pseudo-header as big-endian 16-bit words */
+    for (int i = 0; i < 12; i += 2)
+        sum += ((uint16_t)pseudo[i] << 8) | pseudo[i + 1];
+
+    /* Sum TCP segment as big-endian 16-bit words */
+    const uint8_t *d = (const uint8_t *)tcp_data;
+    uint16_t i;
+    for (i = 0; i + 1 < tcp_len; i += 2)
+        sum += ((uint16_t)d[i] << 8) | d[i + 1];
+    if (i < tcp_len)
+        sum += (uint16_t)d[i] << 8;
+
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    uint16_t result = (uint16_t)~sum;
+
+    /* Return in network byte order — caller stores in packed struct */
+    return htons(result);
+}
+
+static int tcp_send_packet(uint8_t flags, const void *data, uint16_t data_len) {
+    static uint8_t pkt[1480];
+    uint16_t hdr_len = 20;
+
+    /* Add MSS option on SYN */
+    if (flags & TCP_SYN) hdr_len = 24;
+
+    /* Build IPv4 header */
+    struct ipv4_header *ip = (struct ipv4_header *)pkt;
+    uint16_t tcp_total = hdr_len + data_len;
+    ip->ver_ihl    = 0x45;
+    ip->tos        = 0;
+    ip->total_len  = htons(20 + tcp_total);
+    ip->id         = htons(ip_id_counter++);
+    ip->flags_frag = 0;
+    ip->ttl        = 64;
+    ip->protocol   = 6;
+    ip->checksum   = 0;
+    ip->src_ip     = config.ip;
+    ip->dst_ip     = tcp.remote_ip;
+    ip->checksum   = checksum(ip, 20);
+
+    /* Build TCP header */
+    struct tcp_header *th = (struct tcp_header *)(pkt + 20);
+    th->src_port = htons(tcp.local_port);
+    th->dst_port = htons(tcp.remote_port);
+    th->seq_num = htonl(tcp.seq);
+    th->ack_num = htonl(tcp.ack);
+    th->data_offset = (uint8_t)((hdr_len / 4) << 4);
+    th->flags = flags;
+    th->window = htons(16384);
+    th->checksum = 0;
+    th->urgent_ptr = 0;
+
+    if (flags & TCP_SYN) {
+        /* MSS option: kind=2, len=4, value=1460 */
+        pkt[40] = 2; pkt[41] = 4;
+        pkt[42] = (uint8_t)(1460 >> 8);
+        pkt[43] = (uint8_t)(1460 & 0xFF);
+    }
+
+    if (data && data_len > 0)
+        mem_copy(pkt + 20 + hdr_len, data, data_len);
+
+    th->checksum = tcp_checksum(pkt + 20, tcp_total, config.ip, tcp.remote_ip);
+
+    /* Debug: dump IP+TCP header */
+    if (flags & TCP_SYN) {
+        net_dbg("TCP SYN pkt (");
+        net_dbg_dec(20 + tcp_total);
+        net_dbg(" bytes):\n");
+        for (uint16_t i = 0; i < 20 + tcp_total; i++) {
+            net_dbg_hex8(pkt[i]);
+            net_dbg(" ");
+            if ((i & 15) == 15) net_dbg("\n");
+        }
+        net_dbg("\n");
+    }
+
+    /* Send directly via Ethernet using cached MAC — avoids blocking ARP in ISR context */
+    return net_send_ethernet(tcp.remote_mac, ETH_TYPE_IPV4, pkt, 20 + tcp_total);
+}
+
+int net_tcp_connect(uint32_t ip, uint16_t port) {
+    mem_set(&tcp, 0, sizeof(tcp));
+    tcp.state = TCP_STATE_CLOSED;
+    tcp.remote_ip = ip;
+    tcp.remote_port = port;
+    tcp.local_port = 49152 + (uint16_t)(timer_get_ticks() & 0x3FFF);
+    tcp.seq = timer_get_ticks() * 7919 + 12345;
+    tcp.initial_seq = tcp.seq;
+    tcp.rx_len = 0;
+    tcp.rx_fin = false;
+
+    /* Resolve next-hop MAC now (in user context, blocking ARP is safe) */
+    uint32_t next_hop;
+    if (config.subnet != 0 && (ip & config.subnet) == (config.ip & config.subnet))
+        next_hop = ip;
+    else
+        next_hop = config.gateway;
+    if (!net_arp_lookup(next_hop, tcp.remote_mac)) {
+        net_dbg("TCP: ARP fail\n");
+        return -1;
+    }
+
+    /* Send SYN */
+    tcp.state = TCP_STATE_SYN_SENT;
+    net_dbg("TCP: sending SYN to port ");
+    net_dbg_dec(port);
+    net_dbg("\n");
+    tcp_send_packet(TCP_SYN, NULL, 0);
+    tcp.seq++;  /* SYN consumes one sequence number */
+
+    /* Wait for ESTABLISHED */
+    uint32_t start = timer_get_ticks();
+    while (timer_get_ticks() - start < 500) {
+        if (tcp.state == TCP_STATE_ESTABLISHED) return 0;
+        if (tcp.state == TCP_STATE_CLOSED) return -1;
+        __asm__ __volatile__("hlt");
+    }
+
+    tcp.state = TCP_STATE_CLOSED;
+    return -1;
+}
+
+int net_tcp_send(const void *data, uint16_t len) {
+    if (tcp.state != TCP_STATE_ESTABLISHED) return -1;
+
+    /* Send in segments */
+    const uint8_t *p = (const uint8_t *)data;
+    while (len > 0) {
+        uint16_t seg = len > 1400 ? 1400 : len;
+        tcp_send_packet(TCP_ACK | TCP_PSH, p, seg);
+        tcp.seq += seg;
+        p += seg;
+        len -= seg;
+    }
+    return 0;
+}
+
+int net_tcp_receive(void *buf, uint16_t max, uint32_t timeout_ticks) {
+    uint32_t start = timer_get_ticks();
+
+    while (timer_get_ticks() - start < timeout_ticks) {
+        if (tcp.rx_len > 0) {
+            uint16_t copy = tcp.rx_len > max ? max : tcp.rx_len;
+            mem_copy(buf, tcp.rx_buf, copy);
+            /* Shift remaining data */
+            if (copy < tcp.rx_len)
+                mem_copy(tcp.rx_buf, tcp.rx_buf + copy, tcp.rx_len - copy);
+            tcp.rx_len -= copy;
+            return (int)copy;
+        }
+        if (tcp.rx_fin || tcp.state == TCP_STATE_CLOSED) {
+            return 0;  /* Connection closed */
+        }
+        __asm__ __volatile__("hlt");
+    }
+    return tcp.rx_len > 0 ? 0 : -1;  /* Timeout */
+}
+
+void net_tcp_close(void) {
+    if (tcp.state == TCP_STATE_ESTABLISHED) {
+        tcp.state = TCP_STATE_FIN_WAIT1;
+        tcp_send_packet(TCP_FIN | TCP_ACK, NULL, 0);
+        tcp.seq++;
+    }
+    /* Wait briefly for FIN exchange */
+    uint32_t start = timer_get_ticks();
+    while (timer_get_ticks() - start < 100 && tcp.state != TCP_STATE_CLOSED) {
+        __asm__ __volatile__("hlt");
+    }
+    tcp.state = TCP_STATE_CLOSED;
+}
+
+static void net_handle_tcp(uint32_t src_ip, const void *data, uint16_t len) {
+    net_dbg("TCP RX: len=");
+    net_dbg_dec(len);
+    net_dbg(" state=");
+    net_dbg_dec(tcp.state);
+    net_dbg("\n");
+
+    if (len < 20) return;
+    const struct tcp_header *th = (const struct tcp_header *)data;
+
+    uint16_t src_port = ntohs(th->src_port);
+    uint16_t dst_port = ntohs(th->dst_port);
+
+    /* Must match our connection */
+    if (src_ip != tcp.remote_ip || src_port != tcp.remote_port ||
+        dst_port != tcp.local_port) {
+        net_dbg("TCP: no match sp=");
+        net_dbg_dec(src_port);
+        net_dbg(" dp=");
+        net_dbg_dec(dst_port);
+        net_dbg(" lp=");
+        net_dbg_dec(tcp.local_port);
+        net_dbg("\n");
+        return;
+    }
+
+    uint32_t seq = ntohl(th->seq_num);
+    uint32_t ack = ntohl(th->ack_num);
+    uint8_t  flags = th->flags;
+    uint8_t  hdr_len = (th->data_offset >> 4) * 4;
+    uint16_t payload_len = len - hdr_len;
+    const uint8_t *payload = (const uint8_t *)data + hdr_len;
+
+    if (flags & TCP_RST) {
+        tcp.state = TCP_STATE_CLOSED;
+        return;
+    }
+
+    switch (tcp.state) {
+    case TCP_STATE_SYN_SENT:
+        if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
+            tcp.ack = seq + 1;
+            tcp.state = TCP_STATE_ESTABLISHED;
+            tcp_send_packet(TCP_ACK, NULL, 0);
+        }
+        break;
+
+    case TCP_STATE_ESTABLISHED:
+        /* Handle incoming data */
+        if (payload_len > 0 && seq == tcp.ack) {
+            uint16_t space = (uint16_t)(sizeof(tcp.rx_buf) - tcp.rx_len);
+            uint16_t copy = payload_len > space ? space : payload_len;
+            if (copy > 0) {
+                mem_copy(tcp.rx_buf + tcp.rx_len, payload, copy);
+                tcp.rx_len += copy;
+            }
+            tcp.ack = seq + payload_len;
+            tcp_send_packet(TCP_ACK, NULL, 0);
+        }
+        /* Handle FIN */
+        if (flags & TCP_FIN) {
+            tcp.ack = seq + payload_len + 1;
+            tcp_send_packet(TCP_ACK, NULL, 0);
+            tcp.rx_fin = true;
+            tcp.state = TCP_STATE_CLOSED;
+        }
+        break;
+
+    case TCP_STATE_FIN_WAIT1:
+        if (flags & TCP_ACK) {
+            if (flags & TCP_FIN) {
+                tcp.ack = seq + 1;
+                tcp_send_packet(TCP_ACK, NULL, 0);
+                tcp.state = TCP_STATE_CLOSED;
+            } else {
+                tcp.state = TCP_STATE_FIN_WAIT2;
+            }
+        }
+        /* Also handle any data in FIN_WAIT1 */
+        if (payload_len > 0 && seq == tcp.ack) {
+            uint16_t space = (uint16_t)(sizeof(tcp.rx_buf) - tcp.rx_len);
+            uint16_t copy = payload_len > space ? space : payload_len;
+            if (copy > 0) {
+                mem_copy(tcp.rx_buf + tcp.rx_len, payload, copy);
+                tcp.rx_len += copy;
+            }
+            tcp.ack = seq + payload_len;
+        }
+        break;
+
+    case TCP_STATE_FIN_WAIT2:
+        if (flags & TCP_FIN) {
+            tcp.ack = seq + payload_len + 1;
+            tcp_send_packet(TCP_ACK, NULL, 0);
+            tcp.state = TCP_STATE_CLOSED;
+        }
+        if (payload_len > 0 && seq == tcp.ack) {
+            uint16_t space = (uint16_t)(sizeof(tcp.rx_buf) - tcp.rx_len);
+            uint16_t copy = payload_len > space ? space : payload_len;
+            if (copy > 0) {
+                mem_copy(tcp.rx_buf + tcp.rx_len, payload, copy);
+                tcp.rx_len += copy;
+            }
+            tcp.ack = seq + payload_len;
+            tcp_send_packet(TCP_ACK, NULL, 0);
+        }
+        break;
+    }
+    (void)ack;
+}
+
+/* ---- HTTP ---- */
+
+static int parse_url(const char *url, char *host, int host_max,
+                     uint16_t *port, char *path, int path_max) {
+    *port = 80;
+    path[0] = '/'; path[1] = '\0';
+
+    /* Skip "http://" */
+    if (str_starts_with(url, "http://")) url += 7;
+
+    /* Extract host (up to '/', ':', or end) */
+    int hi = 0;
+    while (*url && *url != '/' && *url != ':' && hi < host_max - 1)
+        host[hi++] = *url++;
+    host[hi] = '\0';
+
+    /* Optional port */
+    if (*url == ':') {
+        url++;
+        *port = 0;
+        while (*url >= '0' && *url <= '9') {
+            *port = *port * 10 + (*url - '0');
+            url++;
+        }
+    }
+
+    /* Path */
+    if (*url == '/') {
+        int pi = 0;
+        while (*url && pi < path_max - 1)
+            path[pi++] = *url++;
+        path[pi] = '\0';
+    }
+
+    return hi > 0 ? 0 : -1;
+}
+
+int net_http_get(const char *url, char *buf, int max_size) {
+    static char host[128];
+    static char path[256];
+    uint16_t port;
+
+    if (parse_url(url, host, sizeof(host), &port, path, sizeof(path)) < 0)
+        return -1;
+
+    net_dbg("HTTP: host=");
+    net_dbg(host);
+    net_dbg(" path=");
+    net_dbg(path);
+    net_dbg("\n");
+
+    /* DNS resolve */
+    uint32_t ip;
+    if (!net_dns_resolve(host, &ip)) {
+        net_dbg("HTTP: DNS fail\n");
+        return -2;  /* DNS failure */
+    }
+
+    net_dbg("HTTP: resolved IP ok\n");
+
+    /* TCP connect */
+    if (net_tcp_connect(ip, port) < 0) {
+        net_dbg("HTTP: connect fail\n");
+        return -3;  /* TCP connect failure */
+    }
+
+    net_dbg("HTTP: connected\n");
+
+    /* Build HTTP request */
+    static char req[512];
+    int ri = 0;
+    /* "GET /path HTTP/1.0\r\n" */
+    const char *g = "GET ";
+    while (*g) req[ri++] = *g++;
+    const char *pp = path;
+    while (*pp) req[ri++] = *pp++;
+    const char *v = " HTTP/1.0\r\nHost: ";
+    while (*v) req[ri++] = *v++;
+    const char *hh = host;
+    while (*hh) req[ri++] = *hh++;
+    const char *cl = "\r\nConnection: close\r\nUser-Agent: AI_OS/0.3\r\n\r\n";
+    while (*cl) req[ri++] = *cl++;
+    req[ri] = '\0';
+
+    net_tcp_send(req, (uint16_t)ri);
+
+    /* Receive response */
+    int total = 0;
+    int body_start = -1;
+    static uint8_t tmp[1024];
+
+    while (total < max_size - 1) {
+        int n = net_tcp_receive(tmp, sizeof(tmp), 500);
+        if (n <= 0) break;
+
+        for (int i = 0; i < n && total < max_size - 1; i++) {
+            buf[total++] = (char)tmp[i];
+        }
+    }
+    buf[total] = '\0';
+
+    net_tcp_close();
+
+    /* Find end of HTTP headers */
+    for (int i = 0; i < total - 3; i++) {
+        if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
+            body_start = i + 4;
+            break;
+        }
+    }
+
+    if (body_start < 0) {
+        /* No headers found — return raw */
+        return total;
+    }
+
+    /* Shift body to start of buffer */
+    int body_len = total - body_start;
+    mem_copy(buf, buf + body_start, (uint32_t)body_len);
+    buf[body_len] = '\0';
+    return body_len;
 }
 
 /* ---- Rx callback (called from RTL8139 ISR) ---- */

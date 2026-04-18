@@ -104,6 +104,7 @@ static void cmd_help(void) {
     vga_print_colored(" Network:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
     help_row("  ifconfig    Network config",            "  dhcp        Get IP via DHCP");
     help_row("  ping <ip>   Ping a host",               "  arp         Show ARP table");
+    help_row("  wget <url>  Fetch a URL",               "");
 }
 
 static void cmd_info(void) {
@@ -873,6 +874,90 @@ static void cmd_arp(void) {
     vga_print("\n");
 }
 
+static void cmd_dns(int argc, char *argv[]) {
+    if (argc < 2) {
+        vga_print("\n  Usage: dns <hostname>\n\n");
+        return;
+    }
+    if (!net_is_up()) {
+        vga_print_colored("\n  Network not available\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+    struct net_config *cfg = net_get_config();
+    if (!cfg->configured) {
+        vga_print_colored("\n  No IP configured. Run 'dhcp' first.\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+
+    vga_print("\n  Resolving ");
+    vga_print(argv[1]);
+    vga_print("...\n");
+
+    vga_print("  DNS server: ");
+    static char ipbuf[20];
+    net_format_ip(cfg->dns, ipbuf);
+    vga_print(ipbuf);
+    vga_print("\n");
+
+    uint32_t ip;
+    if (net_dns_resolve(argv[1], &ip)) {
+        net_format_ip(ip, ipbuf);
+        vga_print_colored("  Resolved: ", VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK));
+        vga_print(ipbuf);
+        vga_print("\n\n");
+    } else {
+        vga_print_colored("  DNS resolution failed\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+    }
+}
+
+static void cmd_wget(int argc, char *argv[]) {
+    if (argc < 2) {
+        vga_print("\n  Usage: wget <url>\n\n");
+        return;
+    }
+    if (!net_is_up()) {
+        vga_print_colored("\n  Network not available\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+    struct net_config *cfg = net_get_config();
+    if (!cfg->configured) {
+        vga_print_colored("\n  No IP configured. Run 'dhcp' first.\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+
+    vga_print_colored("\n  Fetching ", VGA_COLOR(VGA_YELLOW, VGA_BLACK));
+    vga_print(argv[1]);
+    vga_print("...\n");
+
+    static char http_buf[4096];
+    int len = net_http_get(argv[1], http_buf, sizeof(http_buf));
+    if (len < 0) {
+        if (len == -1)
+            vga_print_colored("  Error: invalid URL\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        else if (len == -2)
+            vga_print_colored("  Error: DNS resolution failed\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        else if (len == -3)
+            vga_print_colored("  Error: TCP connection failed\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        else
+            vga_print_colored("  Error: HTTP fetch failed\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+
+    vga_print_colored("  Received ", VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK));
+    vga_print_dec((uint32_t)len);
+    vga_print(" bytes:\n\n");
+
+    /* Print first 1024 bytes */
+    int show = len > 1024 ? 1024 : len;
+    for (int i = 0; i < show; i++) {
+        char c = http_buf[i];
+        if (c == '\n') vga_putchar('\n');
+        else if (c >= 0x20 && c < 0x7F) vga_putchar(c);
+    }
+    if (len > 1024) vga_print("\n  ... (truncated)");
+    vga_print("\n\n");
+}
+
 /* ---- Command dispatcher ---- */
 
 void shell_execute(char *input) {
@@ -925,6 +1010,8 @@ void shell_execute(char *input) {
     else if (str_eq(argv[0], "ping"))     cmd_ping(argc, argv);
     else if (str_eq(argv[0], "dhcp"))     cmd_dhcp();
     else if (str_eq(argv[0], "arp"))      cmd_arp();
+    else if (str_eq(argv[0], "wget"))     cmd_wget(argc, argv);
+    else if (str_eq(argv[0], "dns"))      cmd_dns(argc, argv);
     else {
         vga_print_colored("\n  Unknown command: '", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
         vga_print_colored(argv[0], VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
