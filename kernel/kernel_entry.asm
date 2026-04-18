@@ -171,3 +171,15 @@ _isr_stub_mouse:
     call _mouse_handler
     popad
     iretd
+
+; ============================================================================
+; Network ISR stub (RTL8139 PCI interrupt)
+; ============================================================================
+[GLOBAL _isr_stub_network]
+[EXTERN _rtl8139_handler]
+
+_isr_stub_network:
+    pushad
+    call _rtl8139_handler
+    popad
+    iretd

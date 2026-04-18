@@ -47,6 +47,7 @@ $CC $CFLAGS kernel/memory.c    -o "$BUILD_DIR/memory.o"
 $CC $CFLAGS kernel/string.c    -o "$BUILD_DIR/string.o"
 $CC $CFLAGS kernel/process.c   -o "$BUILD_DIR/process.o"
 $CC $CFLAGS kernel/fs.c        -o "$BUILD_DIR/fs.o"
+$CC $CFLAGS kernel/net.c       -o "$BUILD_DIR/net.o"
 # Drivers
 $CC $CFLAGS drivers/vga.c      -o "$BUILD_DIR/vga.o"
 $CC $CFLAGS drivers/keyboard.c -o "$BUILD_DIR/keyboard.o"
@@ -56,6 +57,8 @@ $CC $CFLAGS drivers/framebuffer.c -o "$BUILD_DIR/framebuffer.o"
 $CC $CFLAGS drivers/mouse.c    -o "$BUILD_DIR/mouse.o"
 $CC $CFLAGS drivers/rtc.c     -o "$BUILD_DIR/rtc.o"
 $CC $CFLAGS drivers/ata.c     -o "$BUILD_DIR/ata.o"
+$CC $CFLAGS drivers/pci.c     -o "$BUILD_DIR/pci.o"
+$CC $CFLAGS drivers/rtl8139.c -o "$BUILD_DIR/rtl8139.o"
 # Shell & Apps
 $CC $CFLAGS shell/shell.c      -o "$BUILD_DIR/shell.o"
 $CC $CFLAGS apps/editor.c      -o "$BUILD_DIR/editor.o"
@@ -105,6 +108,9 @@ $LD $LDFLAGS \
     "$BUILD_DIR/mouse.o" \
     "$BUILD_DIR/rtc.o" \
     "$BUILD_DIR/ata.o" \
+    "$BUILD_DIR/pci.o" \
+    "$BUILD_DIR/rtl8139.o" \
+    "$BUILD_DIR/net.o" \
     "$BUILD_DIR/font_data.o" \
     "$BUILD_DIR/event.o" \
     "$BUILD_DIR/window.o" \
@@ -143,5 +149,5 @@ fi
 echo ""
 echo "========================================"
 echo "  Build complete!"
-echo "  Run: qemu-system-i386 -fda build/ai_os.img -hda build/disk.img -vga std -m 128"
+echo "  Run: qemu-system-i386 -fda build/ai_os.img -hda build/disk.img -vga std -m 128 -netdev user,id=net0 -device rtl8139,netdev=net0"
 echo "========================================"

@@ -30,6 +30,9 @@
 #include "taskmanager.h"
 #include "browser.h"
 #include "ata.h"
+#include "pci.h"
+#include "rtl8139.h"
+#include "net.h"
 
 /* Minimal debug output via QEMU debug port (0xE9) */
 static void dbg_putc(char c) {
@@ -58,6 +61,16 @@ void kernel_main(void) {
     /* Disk + Filesystem */
     bool have_disk = ata_init();
     dbg_print(have_disk ? "ATA ok\n" : "ATA: no disk\n");
+
+    /* Network */
+    pci_init();
+    dbg_print("PCI ok\n");
+    bool have_nic = rtl8139_init();
+    dbg_print(have_nic ? "NIC ok\n" : "NIC: not found\n");
+    if (have_nic) {
+        net_init();
+        dbg_print("NET ok\n");
+    }
 
     fs_init();
     if (have_disk && fs_load_from_disk() == 0) {

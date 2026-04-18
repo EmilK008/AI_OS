@@ -16,6 +16,8 @@
 #include "ata.h"
 #include "rtc.h"
 #include "snake.h"
+#include "net.h"
+#include "rtl8139.h"
 
 #define CMD_BUFFER_SIZE 256
 #define MAX_ARGS 16
@@ -99,6 +101,9 @@ static void cmd_help(void) {
     help_row("  ",                                      "  format      Format disk");
     vga_print_colored("              ", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
     vga_print_colored("(clock, counter, fib)\n", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
+    vga_print_colored(" Network:\n", VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK));
+    help_row("  ifconfig    Network config",            "  dhcp        Get IP via DHCP");
+    help_row("  ping <ip>   Ping a host",               "  arp         Show ARP table");
 }
 
 static void cmd_info(void) {
@@ -736,6 +741,138 @@ static void cmd_snake(void) {
     snake_run();
 }
 
+/* ---- Network commands ---- */
+
+static void cmd_ifconfig(void) {
+    if (!net_is_up()) {
+        vga_print_colored("\n  Network not available\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+    struct net_config *cfg = net_get_config();
+    char ip_buf[16];
+    uint8_t *m = cfg->mac;
+
+    vga_print_colored("\n  === Network Configuration ===\n", VGA_COLOR(VGA_YELLOW, VGA_BLACK));
+
+    vga_print("  MAC:     ");
+    for (int i = 0; i < 6; i++) {
+        uint8_t v = m[i];
+        const char hex[] = "0123456789ABCDEF";
+        vga_putchar(hex[v >> 4]);
+        vga_putchar(hex[v & 0xF]);
+        if (i < 5) vga_putchar(':');
+    }
+    vga_print("\n");
+
+    if (cfg->configured) {
+        net_format_ip(cfg->ip, ip_buf);
+        vga_print("  IP:      "); vga_print(ip_buf); vga_print("\n");
+        net_format_ip(cfg->subnet, ip_buf);
+        vga_print("  Subnet:  "); vga_print(ip_buf); vga_print("\n");
+        net_format_ip(cfg->gateway, ip_buf);
+        vga_print("  Gateway: "); vga_print(ip_buf); vga_print("\n");
+        net_format_ip(cfg->dns, ip_buf);
+        vga_print("  DNS:     "); vga_print(ip_buf); vga_print("\n");
+    } else {
+        vga_print_colored("  Not configured (run 'dhcp')\n", VGA_COLOR(VGA_DARK_GREY, VGA_BLACK));
+    }
+    vga_print("\n");
+}
+
+static void cmd_ping(int argc, char *argv[]) {
+    if (argc < 2) {
+        vga_print("\n  Usage: ping <ip>\n\n");
+        return;
+    }
+    if (!net_is_up()) {
+        vga_print_colored("\n  Network not available\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+    struct net_config *cfg = net_get_config();
+    if (!cfg->configured) {
+        vga_print_colored("\n  No IP configured. Run 'dhcp' first.\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+
+    uint32_t ip = net_parse_ip(argv[1]);
+    char ip_buf[16];
+    net_format_ip(ip, ip_buf);
+    vga_print("\n  Pinging "); vga_print(ip_buf); vga_print("...\n");
+
+    for (int i = 0; i < 4; i++) {
+        int rtt = net_ping(ip);
+        if (rtt >= 0) {
+            vga_print_colored("  Reply from ", VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK));
+            vga_print(ip_buf);
+            vga_print(": time=");
+            vga_print_dec((uint32_t)(rtt * 10));
+            vga_print("ms\n");
+        } else {
+            vga_print_colored("  Request timed out\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        }
+        if (i < 3) timer_wait(100);  /* 1 second between pings */
+    }
+    vga_print("\n");
+}
+
+static void cmd_dhcp(void) {
+    if (!net_is_up()) {
+        vga_print_colored("\n  Network not available\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+    vga_print_colored("\n  Sending DHCP discover...\n", VGA_COLOR(VGA_YELLOW, VGA_BLACK));
+
+    if (net_dhcp_discover()) {
+        struct net_config *cfg = net_get_config();
+        char ip_buf[16];
+        vga_print_colored("  DHCP successful!\n", VGA_COLOR(VGA_LIGHT_GREEN, VGA_BLACK));
+        net_format_ip(cfg->ip, ip_buf);
+        vga_print("  IP:      "); vga_print(ip_buf); vga_print("\n");
+        net_format_ip(cfg->gateway, ip_buf);
+        vga_print("  Gateway: "); vga_print(ip_buf); vga_print("\n");
+        net_format_ip(cfg->dns, ip_buf);
+        vga_print("  DNS:     "); vga_print(ip_buf); vga_print("\n");
+    } else {
+        vga_print_colored("  DHCP failed - no response\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+    }
+    vga_print("\n");
+}
+
+static void cmd_arp(void) {
+    if (!net_is_up()) {
+        vga_print_colored("\n  Network not available\n\n", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
+        return;
+    }
+    uint32_t ips[16];
+    uint8_t macs[16 * 6];
+    int count = 0;
+    net_arp_get_table(ips, macs, &count, 16);
+
+    vga_print_colored("\n  === ARP Table ===\n", VGA_COLOR(VGA_YELLOW, VGA_BLACK));
+    if (count == 0) {
+        vga_print("  (empty)\n");
+    }
+    for (int i = 0; i < count; i++) {
+        char ip_buf[16];
+        net_format_ip(ips[i], ip_buf);
+        vga_print("  ");
+        vga_print(ip_buf);
+        /* Pad to 16 chars */
+        int pad = 16 - str_len(ip_buf);
+        while (pad-- > 0) vga_putchar(' ');
+        vga_print(" -> ");
+        for (int j = 0; j < 6; j++) {
+            uint8_t v = macs[i * 6 + j];
+            const char hex[] = "0123456789ABCDEF";
+            vga_putchar(hex[v >> 4]);
+            vga_putchar(hex[v & 0xF]);
+            if (j < 5) vga_putchar(':');
+        }
+        vga_print("\n");
+    }
+    vga_print("\n");
+}
+
 /* ---- Command dispatcher ---- */
 
 void shell_execute(char *input) {
@@ -783,6 +920,11 @@ void shell_execute(char *input) {
     else if (str_eq(argv[0], "play"))    cmd_play(argc, argv);
     else if (str_eq(argv[0], "song"))    cmd_song();
     else if (str_eq(argv[0], "snake"))   cmd_snake();
+    /* Network */
+    else if (str_eq(argv[0], "ifconfig")) cmd_ifconfig();
+    else if (str_eq(argv[0], "ping"))     cmd_ping(argc, argv);
+    else if (str_eq(argv[0], "dhcp"))     cmd_dhcp();
+    else if (str_eq(argv[0], "arp"))      cmd_arp();
     else {
         vga_print_colored("\n  Unknown command: '", VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
         vga_print_colored(argv[0], VGA_COLOR(VGA_LIGHT_RED, VGA_BLACK));
