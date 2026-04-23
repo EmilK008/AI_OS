@@ -11,6 +11,7 @@
 #include "keyboard.h"
 #include "timer.h"
 #include "net.h"
+#include "net_tls.h"
 
 #define BRW_W       500
 #define BRW_H       360
@@ -1530,6 +1531,12 @@ static int fetch_content(const char *url, char *buf, int max_size) {
         if (!cfg->configured) return -1;
         return net_http_get(url, buf, max_size);
     }
+    if (str_starts_with(url, "https://")) {
+        if (!net_is_up()) return -1;
+        struct net_config *cfg = net_get_config();
+        if (!cfg->configured) return -1;
+        return net_https_get(url, buf, max_size);
+    }
     /* Local filesystem */
     int idx = fs_find(url);
     if (idx < 0) return -1;
@@ -1554,14 +1561,16 @@ static void load_page(struct browser_tab *tab, const char *filename) {
     tab->addr_buf[i] = '\0';
     tab->addr_len = i;
 
-    /* Show loading status for HTTP */
-    if (str_starts_with(filename, "http://"))
+    /* Show loading status for HTTP / HTTPS */
+    if (str_starts_with(filename, "http://") ||
+        str_starts_with(filename, "https://"))
         str_copy(status_msg, "Loading...");
 
     int result = fetch_content(filename, tab->page_buf, PAGE_BUF_SIZE);
     if (result < 0) {
         const char *err;
-        if (str_starts_with(filename, "http://"))
+        if (str_starts_with(filename, "http://") ||
+            str_starts_with(filename, "https://"))
             err = "<h1>Network Error</h1><p>Could not fetch: ";
         else
             err = "<h1>File Not Found</h1><p>Could not find: ";

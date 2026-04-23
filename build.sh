@@ -17,6 +17,14 @@ OBJCOPY="objcopy"
 
 # Compiler flags for freestanding 32-bit x86 kernel
 CFLAGS="-m32 -march=i686 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -mno-stack-arg-probe -mno-sse -mno-sse2 -mno-mmx -nostdlib -nostdinc -Wall -Wextra -Iinclude -O2 -c"
+
+# BearSSL needs its own include path (freestanding shim for <stdint.h>,
+# <stddef.h>, <string.h>, <limits.h>) plus the library's own public and
+# private headers. Warnings are downgraded because upstream code is tidy
+# but triggers -Wextra edge cases. -w silences everything, -Wno-error=
+# would be fine too. We keep -O2 for perf (crypto is expensive).
+BEARSSL_CFLAGS="-m32 -march=i686 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -mno-stack-arg-probe -mno-sse -mno-sse2 -mno-mmx -nostdlib -nostdinc -w -Ilib/bearssl_shim -Iinclude -Ilib/bearssl/inc -Ilib/bearssl/src -O2 -c"
+
 LDFLAGS="-m i386pe -T linker.ld -nostdlib --section-alignment 16 --file-alignment 16"
 
 BUILD_DIR="build"
@@ -45,9 +53,15 @@ $CC $CFLAGS kernel/kernel.c    -o "$BUILD_DIR/kernel.o"
 $CC $CFLAGS kernel/idt.c       -o "$BUILD_DIR/idt.o"
 $CC $CFLAGS kernel/memory.c    -o "$BUILD_DIR/memory.o"
 $CC $CFLAGS kernel/string.c    -o "$BUILD_DIR/string.o"
+$CC $CFLAGS kernel/bearssl_shim.c -o "$BUILD_DIR/bearssl_shim.o"
+$CC $CFLAGS kernel/bearssl_entropy.c -o "$BUILD_DIR/bearssl_entropy.o"
 $CC $CFLAGS kernel/process.c   -o "$BUILD_DIR/process.o"
 $CC $CFLAGS kernel/fs.c        -o "$BUILD_DIR/fs.o"
 $CC $CFLAGS kernel/net.c       -o "$BUILD_DIR/net.o"
+# net_tls.c and trust_anchors.c pull in BearSSL public headers, so they
+# must compile with the BearSSL include paths / shim.
+$CC $BEARSSL_CFLAGS kernel/net_tls.c       -o "$BUILD_DIR/net_tls.o"
+$CC $BEARSSL_CFLAGS kernel/trust_anchors.c -o "$BUILD_DIR/trust_anchors.o"
 # Drivers
 $CC $CFLAGS drivers/vga.c      -o "$BUILD_DIR/vga.o"
 $CC $CFLAGS drivers/keyboard.c -o "$BUILD_DIR/keyboard.o"
@@ -79,6 +93,36 @@ $CC $CFLAGS gui/desktop.c      -o "$BUILD_DIR/desktop.o"
 $CC $CFLAGS gui/terminal.c     -o "$BUILD_DIR/terminal.o"
 $CC $CFLAGS gui/appmenu.c      -o "$BUILD_DIR/appmenu.o"
 
+# Step 3b: Compile BearSSL (TLS library) - client-only subset.
+#
+# We skip:
+#   - rand/sysrng.c          (pulls in <wincrypt.h> / <unistd.h> via host libc;
+#                             AI_OS supplies its own PRNG seeding in net_tls.c)
+#   - ssl/ssl_server*.c      (server-side TLS; browser is client only)
+#   - ssl/ssl_hs_server.c
+#
+# Everything else is pure C and compiles against our freestanding shim.
+echo "[3b/5] Compiling BearSSL (TLS library)..."
+BEARSSL_OBJDIR="$BUILD_DIR/bearssl"
+mkdir -p "$BEARSSL_OBJDIR"
+
+BEARSSL_OBJS=""
+BEARSSL_FILE_COUNT=0
+for src in $(find lib/bearssl/src -name '*.c' | sort); do
+    base=$(basename "$src" .c)
+    # Exclusion list
+    case "$base" in
+        sysrng)          continue ;;
+        ssl_server*)     continue ;;
+        ssl_hs_server)   continue ;;
+    esac
+    obj="$BEARSSL_OBJDIR/${base}.o"
+    $CC $BEARSSL_CFLAGS "$src" -o "$obj"
+    BEARSSL_OBJS="$BEARSSL_OBJS $obj"
+    BEARSSL_FILE_COUNT=$((BEARSSL_FILE_COUNT + 1))
+done
+echo "      BearSSL: compiled $BEARSSL_FILE_COUNT translation units"
+
 # Step 4: Link kernel
 echo "[4/5] Linking kernel..."
 $LD $LDFLAGS \
@@ -87,6 +131,8 @@ $LD $LDFLAGS \
     "$BUILD_DIR/idt.o" \
     "$BUILD_DIR/memory.o" \
     "$BUILD_DIR/string.o" \
+    "$BUILD_DIR/bearssl_shim.o" \
+    "$BUILD_DIR/bearssl_entropy.o" \
     "$BUILD_DIR/process.o" \
     "$BUILD_DIR/fs.o" \
     "$BUILD_DIR/vga.o" \
@@ -111,18 +157,43 @@ $LD $LDFLAGS \
     "$BUILD_DIR/pci.o" \
     "$BUILD_DIR/rtl8139.o" \
     "$BUILD_DIR/net.o" \
+    "$BUILD_DIR/net_tls.o" \
+    "$BUILD_DIR/trust_anchors.o" \
     "$BUILD_DIR/font_data.o" \
     "$BUILD_DIR/event.o" \
     "$BUILD_DIR/window.o" \
     "$BUILD_DIR/desktop.o" \
     "$BUILD_DIR/terminal.o" \
     "$BUILD_DIR/appmenu.o" \
+    $BEARSSL_OBJS \
     -o "$BUILD_DIR/kernel.pe"
 
-# Convert PE to flat binary
-$OBJCOPY -O binary "$BUILD_DIR/kernel.pe" "$BUILD_DIR/kernel.bin"
+# Convert PE to flat binary.
+# -R .bss drops the BSS section from the output; it's already marked NOLOAD
+# in linker.ld and placed at 0x100000, but without -R objcopy would pad the
+# binary with zeros all the way from end-of-.data to the BSS VMA, bloating
+# kernel.bin by ~1 MB. BSS is zeroed at runtime in kernel_entry.asm.
+$OBJCOPY -O binary -R .bss "$BUILD_DIR/kernel.pe" "$BUILD_DIR/kernel.bin"
 
-echo "      kernel.bin: $(wc -c < "$BUILD_DIR/kernel.bin") bytes"
+KERNEL_BYTES=$(wc -c < "$BUILD_DIR/kernel.bin")
+echo "      kernel.bin: $KERNEL_BYTES bytes"
+
+# Sanity check: the bootloader reads KERNEL_SECTORS*512 bytes into
+# physical 0x10000 in real mode. Writing past 0xA0000 (VGA memory hole)
+# silently corrupts the display, and wrapping load_seg past 0xFFFF
+# overwrites the IVT, yielding a dead black-screen boot.
+#
+# We pick a hard cap of 0x90000 bytes = 576 KiB of in-memory kernel
+# (matches the bootloader-safe limit). Kernel.bin must also fit inside
+# KERNEL_SECTORS * 512 bytes.
+KERNEL_MAX_SECTORS=$(grep -E '^KERNEL_SECTORS\s+equ' boot/boot.asm | awk '{print $3}')
+KERNEL_MAX_BYTES=$((KERNEL_MAX_SECTORS * 512))
+if [ "$KERNEL_BYTES" -gt "$KERNEL_MAX_BYTES" ]; then
+    echo "!!! kernel.bin ($KERNEL_BYTES B) exceeds bootloader capacity ($KERNEL_MAX_BYTES B)." >&2
+    echo "!!! Either shrink the kernel or raise KERNEL_SECTORS in boot/boot.asm" >&2
+    echo "!!! (but keep KERNEL_SECTORS*512 <= 0x90000 = 589824 or the boot will break)." >&2
+    exit 1
+fi
 
 # Step 5: Create disk image
 echo "[5/5] Creating disk image..."

@@ -26,6 +26,7 @@ typedef uint32_t color_t;
 
 void    fb_init(void);
 bool    fb_available(void);
+void    fb_force_disable(void);
 void    fb_putpixel(int x, int y, color_t color);
 void    fb_fill_rect(int x, int y, int w, int h, color_t color);
 void    fb_draw_rect(int x, int y, int w, int h, color_t color);

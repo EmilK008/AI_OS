@@ -8,7 +8,18 @@
 [ORG 0x7C00]
 
 KERNEL_OFFSET     equ 0x10000
-KERNEL_SECTORS    equ 512
+; Kernel is loaded at physical 0x10000 in REAL MODE, so we can only
+; safely read up to physical 0xA0000 (VGA memory starts there). That's
+; 0xA0000 - 0x10000 = 0x90000 bytes = 576 KB = 1152 sectors of headroom.
+;
+; Going further than that either corrupts VRAM, fails silently against
+; BIOS ROM, or - once load_seg wraps a 16-bit word - starts overwriting
+; the IVT / BIOS data area / bootloader itself, producing the classic
+; "boots to black screen, kernel_main never runs" symptom.
+;
+; Our kernel (incl. BearSSL) is currently ~944 sectors; 1024 leaves
+; comfortable headroom without approaching the VGA memory hole.
+KERNEL_SECTORS    equ 1024
 
 start:
     cli

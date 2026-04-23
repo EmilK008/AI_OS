@@ -168,10 +168,23 @@ void fb_init(void) {
 
     fb_size = screen_width * screen_height * sizeof(color_t);
     backbuf = (color_t *)kmalloc(fb_size);
-    if (!backbuf) return;
+    if (!backbuf) {
+        /* Turn BGA back off so the text-mode fallback is visible
+         * instead of a black graphics-mode framebuffer. */
+        bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+        return;
+    }
 
     mem_set(backbuf, 0, fb_size);
     initialized = true;
+}
+
+/* Explicitly disable BGA graphics mode. Called by the text-mode fallback
+ * path when fb_init() failed late (after the mode was enabled) - without
+ * this, the display stays in graphics mode showing a black VRAM and the
+ * text-mode banner is invisible (classic "black screen" boot failure). */
+void fb_force_disable(void) {
+    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
 }
 
 bool fb_available(void) {

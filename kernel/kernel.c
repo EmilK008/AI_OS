@@ -175,6 +175,11 @@ void kernel_main(void) {
         }
     } else {
         /* ===== Fallback: Text Mode (original behavior) ===== */
+        /* If fb_init enabled BGA graphics mode but then failed, we must
+         * explicitly disable it or the text-mode VGA output (at 0xB8000)
+         * is not visible - the display keeps showing the empty graphics
+         * framebuffer. */
+        fb_force_disable();
         /* Only now init VGA text mode (slow with -vga std due to MMIO) */
         vga_init();
         uint8_t banner_color = VGA_COLOR(VGA_LIGHT_CYAN, VGA_BLACK);
