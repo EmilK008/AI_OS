@@ -50,8 +50,8 @@
 #define C_TAB_FG    COLOR_RGB(60, 60, 60)
 #define C_TAB_CLOSE COLOR_RGB(150, 50, 50)
 
-/* Page content buffer */
-#define PAGE_BUF_SIZE  8192
+/* Page content buffer (must stay <= GUNZIP_SCRATCH in kernel/net.c) */
+#define PAGE_BUF_SIZE  32768
 
 /* Navigation history */
 #define HISTORY_MAX 16
@@ -887,6 +887,8 @@ struct browser_tab {
     int page_len;
     char addr_buf[ADDR_MAX + 1];
     int addr_len;
+    /* Resolved <base href> for same-origin relative links; empty = use addr_buf */
+    char base_href[ADDR_MAX + 1];
     int scroll_y;
     int content_total_h;
     struct link_region links[MAX_LINKS];
@@ -1523,6 +1525,166 @@ static void bookmarks_load(void) {
 
 /* ---- Page loading ---- */
 
+/* mailto:, javascript:, data:, etc. — leave unchanged */
+static bool href_has_special_scheme(const char *h) {
+    if (str_starts_with(h, "http://") || str_starts_with(h, "https://"))
+        return false;
+    if (h[0] == '/' && h[1] == '/')
+        return false;
+    for (int i = 0; h[i]; i++) {
+        if (h[i] == '/')
+            return false;
+        if (h[i] == ':')
+            return true;
+    }
+    return false;
+}
+
+/* Resolve href against base URL (RFC 3986-style merge for http(s) bases). */
+static void resolve_url_against_base(const char *base, const char *href, char *out, int out_max) {
+    if (out_max < 2) {
+        out[0] = '\0';
+        return;
+    }
+    if (!href[0]) {
+        out[0] = '\0';
+        return;
+    }
+    if (str_starts_with(href, "http://") || str_starts_with(href, "https://")) {
+        str_ncopy(out, href, out_max);
+        return;
+    }
+    if (href_has_special_scheme(href)) {
+        str_ncopy(out, href, out_max);
+        return;
+    }
+    if (href[0] == '#') {
+        int o = 0;
+        for (int i = 0; base[i] && base[i] != '#' && o < out_max - 1; i++)
+            out[o++] = base[i];
+        for (int j = 0; href[j] && o < out_max - 1; j++)
+            out[o++] = href[j];
+        out[o] = '\0';
+        return;
+    }
+    if (!str_starts_with(base, "http://") && !str_starts_with(base, "https://")) {
+        str_ncopy(out, href, out_max);
+        return;
+    }
+    if (href[0] == '/' && href[1] == '/') {
+        const char *prefix = str_starts_with(base, "https://") ? "https:" : "http:";
+        int o = 0;
+        while (*prefix && o < out_max - 1)
+            out[o++] = *prefix++;
+        for (int j = 0; href[j] && o < out_max - 1; j++)
+            out[o++] = href[j];
+        out[o] = '\0';
+        return;
+    }
+    int bl = str_len(base);
+    int sc = -1;
+    for (int i = 0; i + 2 < bl; i++) {
+        if (base[i] == ':' && base[i + 1] == '/' && base[i + 2] == '/') {
+            sc = i;
+            break;
+        }
+    }
+    if (sc < 0) {
+        str_ncopy(out, href, out_max);
+        return;
+    }
+    int path0 = sc + 3;
+    while (path0 < bl && base[path0] != '/' && base[path0] != '?' && base[path0] != '#')
+        path0++;
+    if (href[0] == '/') {
+        int o = 0;
+        for (int i = 0; i < path0 && o < out_max - 1; i++)
+            out[o++] = base[i];
+        for (int j = 0; href[j] && o < out_max - 1; j++)
+            out[o++] = href[j];
+        out[o] = '\0';
+        return;
+    }
+    int last_sl = -1;
+    for (int i = sc + 3; i < bl; i++) {
+        if (base[i] == '/')
+            last_sl = i;
+    }
+    int o = 0;
+    if (last_sl < 0) {
+        for (int i = 0; i < bl && o < out_max - 1; i++)
+            out[o++] = base[i];
+        if (o > 0 && out[o - 1] != '/' && o < out_max - 1)
+            out[o++] = '/';
+    } else {
+        for (int i = 0; i <= last_sl && o < out_max - 1; i++)
+            out[o++] = base[i];
+    }
+    for (int j = 0; href[j] && o < out_max - 1; j++)
+        out[o++] = href[j];
+    out[o] = '\0';
+}
+
+static void parse_document_base(struct browser_tab *tab) {
+    tab->base_href[0] = '\0';
+    if (!str_starts_with(tab->addr_buf, "http://") &&
+        !str_starts_with(tab->addr_buf, "https://"))
+        return;
+    char *pg = tab->page_buf;
+    int pl = tab->page_len;
+    int lim = pl < 16000 ? pl : 16000;
+    for (int p = 0; p < lim; p++) {
+        if (pg[p] != '<')
+            continue;
+        int q = p + 1;
+        while (q < lim && pg[q] == ' ')
+            q++;
+        if (q + 3 >= lim)
+            break;
+        if (to_lower(pg[q]) != 'b' || to_lower(pg[q + 1]) != 'a' ||
+            to_lower(pg[q + 2]) != 's' || to_lower(pg[q + 3]) != 'e')
+            continue;
+        q += 4;
+        if (q < lim && pg[q] != ' ' && pg[q] != '\t' && pg[q] != '>' && pg[q] != '/')
+            continue;
+        int te = p;
+        while (te < pl && pg[te] != '>')
+            te++;
+        if (te >= pl)
+            break;
+        int tf = te - p - 1;
+        if (tf < 1 || tf > 127)
+            break;
+        char tag_full[128];
+        mem_copy(tag_full, pg + p + 1, (uint32_t)tf);
+        tag_full[tf] = '\0';
+        char raw[ADDR_MAX];
+        extract_attr(tag_full, tf, "href", raw, ADDR_MAX);
+        if (raw[0])
+            resolve_url_against_base(tab->addr_buf, raw, tab->base_href, ADDR_MAX);
+        return;
+    }
+}
+
+/* Replace gzip-looking body with a readable message; then parse <base href>. */
+static void tab_post_fetch(struct browser_tab *tab) {
+    if (tab->page_len >= 2 && (uint8_t)tab->page_buf[0] == 0x1f &&
+        (uint8_t)tab->page_buf[1] == 0x8b) {
+        static const char msg[] =
+            "<!DOCTYPE html><html><body><h1>Gzip compressed body</h1>"
+            "<p>The server returned gzip data (binary). The client asks for "
+            "<code>Accept-Encoding: identity</code>; if this still appears, "
+            "inflate support would be needed.</p></body></html>";
+        int ml = str_len(msg);
+        if (ml > PAGE_BUF_SIZE - 1)
+            ml = PAGE_BUF_SIZE - 1;
+        mem_copy(tab->page_buf, msg, (uint32_t)ml);
+        tab->page_buf[ml] = '\0';
+        tab->page_len = ml;
+    }
+    parse_document_base(tab);
+}
+
 /* Fetch page content from filesystem or HTTP */
 static int fetch_content(const char *url, char *buf, int max_size) {
     if (str_starts_with(url, "http://")) {
@@ -1586,6 +1748,8 @@ static void load_page(struct browser_tab *tab, const char *filename) {
         tab->page_len = result;
     }
     tab->page_buf[tab->page_len] = '\0';
+    if (result >= 0)
+        tab_post_fetch(tab);
 
     extract_and_parse_styles(tab);
     parse_script_blocks(tab);
@@ -1613,7 +1777,11 @@ static void navigate_back(struct browser_tab *tab) {
 
     {
         int result = fetch_content(filename, tab->page_buf, PAGE_BUF_SIZE);
-        if (result >= 0) tab->page_len = result;
+        if (result >= 0) {
+            tab->page_len = result;
+            tab->page_buf[tab->page_len] = '\0';
+            tab_post_fetch(tab);
+        }
     }
     tab->page_buf[tab->page_len] = '\0';
     extract_and_parse_styles(tab);
@@ -1642,7 +1810,11 @@ static void navigate_forward(struct browser_tab *tab) {
 
     {
         int result = fetch_content(filename, tab->page_buf, PAGE_BUF_SIZE);
-        if (result >= 0) tab->page_len = result;
+        if (result >= 0) {
+            tab->page_len = result;
+            tab->page_buf[tab->page_len] = '\0';
+            tab_post_fetch(tab);
+        }
     }
     tab->page_buf[tab->page_len] = '\0';
     extract_and_parse_styles(tab);
@@ -2107,7 +2279,9 @@ static int measure_line_width(const char *pbuf, int plen, int pos, int start_x, 
                 tag_eq(tn, ti, "h4") || tag_eq(tn, ti, "h5") || tag_eq(tn, ti, "h6") ||
                 tag_eq(tn, ti, "li") || tag_eq(tn, ti, "hr") || tag_eq(tn, ti, "ul") ||
                 tag_eq(tn, ti, "ol") || tag_eq(tn, ti, "tr") ||
-                tag_eq(tn, ti, "blockquote")))
+                tag_eq(tn, ti, "blockquote") || tag_eq(tn, ti, "main") ||
+                tag_eq(tn, ti, "figure") || tag_eq(tn, ti, "figcaption") ||
+                tag_eq(tn, ti, "noscript")))
                 break;
             while (pos < plen && pbuf[pos] != '>') pos++;
             if (pos < plen) pos++;
@@ -2426,6 +2600,11 @@ void browser_render(void) {
                 continue;
             }
 
+            /* Void head tags — skip before style_push (pos already past closing `>`). */
+            if (tag_eq(tag_name, tn, "base") || tag_eq(tag_name, tn, "meta") ||
+                tag_eq(tag_name, tn, "link"))
+                continue;
+
             if (!closing) {
                 style_push();
 
@@ -2463,7 +2642,9 @@ void browser_render(void) {
                 } else if (tag_eq(tag_name, tn, "p") || tag_eq(tag_name, tn, "div") ||
                            tag_eq(tag_name, tn, "article") || tag_eq(tag_name, tn, "section") ||
                            tag_eq(tag_name, tn, "aside") || tag_eq(tag_name, tn, "footer") ||
-                           tag_eq(tag_name, tn, "header") || tag_eq(tag_name, tn, "nav")) {
+                           tag_eq(tag_name, tn, "header") || tag_eq(tag_name, tn, "nav") ||
+                           tag_eq(tag_name, tn, "main") || tag_eq(tag_name, tn, "figure") ||
+                           tag_eq(tag_name, tn, "figcaption") || tag_eq(tag_name, tn, "noscript")) {
                     if (!closing) { draw_y += 6; draw_x = 8 + cur_style()->padding_left; }
                     else { draw_y += 8; draw_x = 8; }
                     is_block = true;
@@ -2506,7 +2687,14 @@ void browser_render(void) {
                             T->links[T->link_count].y = link_start_y;
                             T->links[T->link_count].w = draw_x - link_start_x;
                             T->links[T->link_count].h = 16;
-                            str_ncopy(T->links[T->link_count].href, current_href, ADDR_MAX);
+                            {
+                                char resolved[ADDR_MAX + 1];
+                                const char *doc =
+                                    T->base_href[0] ? T->base_href : T->addr_buf;
+                                resolve_url_against_base(doc, current_href, resolved,
+                                                         ADDR_MAX + 1);
+                                str_ncopy(T->links[T->link_count].href, resolved, ADDR_MAX);
+                            }
                             T->link_count++;
                         }
                         in_link = false;

@@ -56,6 +56,13 @@ void net_tcp_close(void);
 /* HTTP */
 int  net_http_get(const char *url, char *buf, int max_size);
 
+/* If the body is gzip (RFC 1952), inflate into buf. Returns 0 if unchanged,
+ * 1 if inflated, -1 on failure (buf and *len_io unchanged). max_size is buf cap. */
+int  net_http_gunzip_if_needed(char *buf, int *len_io, int max_size);
+
+bool net_http_headers_chunked(const char *hdr, int hdr_len);
+int  net_http_try_chunked_decode(char *buf, int *len_io, int max_size);
+
 /* IP parsing */
 uint32_t net_parse_ip(const char *str);
 void     net_format_ip(uint32_t ip, char *buf);

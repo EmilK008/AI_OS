@@ -53,11 +53,14 @@ $CC $CFLAGS kernel/kernel.c    -o "$BUILD_DIR/kernel.o"
 $CC $CFLAGS kernel/idt.c       -o "$BUILD_DIR/idt.o"
 $CC $CFLAGS kernel/memory.c    -o "$BUILD_DIR/memory.o"
 $CC $CFLAGS kernel/string.c    -o "$BUILD_DIR/string.o"
+$CC $CFLAGS kernel/setjmp.S     -o "$BUILD_DIR/setjmp.o"
+PUFF_CFLAGS="-m32 -march=i686 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -mno-stack-arg-probe -mno-sse -mno-sse2 -mno-mmx -nostdlib -nostdinc -w -Iinclude -Ilib/puff -O2 -c"
+$CC $PUFF_CFLAGS lib/puff/puff.c -o "$BUILD_DIR/puff.o"
 $CC $CFLAGS kernel/bearssl_shim.c -o "$BUILD_DIR/bearssl_shim.o"
 $CC $CFLAGS kernel/bearssl_entropy.c -o "$BUILD_DIR/bearssl_entropy.o"
 $CC $CFLAGS kernel/process.c   -o "$BUILD_DIR/process.o"
 $CC $CFLAGS kernel/fs.c        -o "$BUILD_DIR/fs.o"
-$CC $CFLAGS kernel/net.c       -o "$BUILD_DIR/net.o"
+$CC $CFLAGS -Ilib/puff kernel/net.c -o "$BUILD_DIR/net.o"
 # net_tls.c and trust_anchors.c pull in BearSSL public headers, so they
 # must compile with the BearSSL include paths / shim.
 $CC $BEARSSL_CFLAGS kernel/net_tls.c       -o "$BUILD_DIR/net_tls.o"
@@ -131,6 +134,8 @@ $LD $LDFLAGS \
     "$BUILD_DIR/idt.o" \
     "$BUILD_DIR/memory.o" \
     "$BUILD_DIR/string.o" \
+    "$BUILD_DIR/setjmp.o" \
+    "$BUILD_DIR/puff.o" \
     "$BUILD_DIR/bearssl_shim.o" \
     "$BUILD_DIR/bearssl_entropy.o" \
     "$BUILD_DIR/process.o" \

@@ -399,7 +399,9 @@ int net_https_get(const char *url, char *buf, int max_size) {
     int  n = 0;
     const char *hdr[] = {
         "GET ", path, " HTTP/1.0\r\nHost: ", host,
-        "\r\nUser-Agent: AI_OS/0.3\r\nConnection: close\r\n\r\n", 0
+        "\r\nUser-Agent: AI_OS/0.3\r\nConnection: close\r\n"
+        "Accept-Encoding: identity\r\n\r\n",
+        0
     };
     for (int i = 0; hdr[i]; i++) {
         const char *s = hdr[i];
@@ -423,5 +425,26 @@ int net_https_get(const char *url, char *buf, int max_size) {
 
     net_dbg("HTTPS: total bytes="); net_dbg_dec((uint32_t)total); net_dbg("\n");
     net_tls_close();
-    return total;
+
+    /* Strip HTTP response headers so the browser sees body only (matches net_http_get). */
+    int body_start = -1;
+    for (int i = 0; i < total - 3; i++) {
+        if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' &&
+            buf[i + 3] == '\n') {
+            body_start = i + 4;
+            break;
+        }
+    }
+    if (body_start < 0)
+        return total;
+    int body_len = total - body_start;
+    bool chunked = net_http_headers_chunked(buf, body_start);
+    memmove(buf, buf + body_start, (size_t)body_len);
+    buf[body_len] = '\0';
+    if (chunked)
+        (void)net_http_try_chunked_decode(buf, &body_len, max_size);
+    buf[body_len] = '\0';
+    (void)net_http_gunzip_if_needed(buf, &body_len, max_size);
+    buf[body_len] = '\0';
+    return body_len;
 }

@@ -8,6 +8,7 @@
 #include "memory.h"
 #include "string.h"
 #include "timer.h"
+#include "puff.h"
 
 /* ---- Packet structures ---- */
 
@@ -1135,6 +1136,226 @@ static int parse_url(const char *url, char *host, int host_max,
     return hi > 0 ? 0 : -1;
 }
 
+/* Scratch for chunked decode + gzip inflate (must be >= browser PAGE_BUF_SIZE). */
+#define GUNZIP_SCRATCH 32768
+static uint8_t gunzip_scratch[GUNZIP_SCRATCH];
+
+static bool hdr_ci_eq(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb + 32);
+        if (ca != cb)
+            return false;
+    }
+    return true;
+}
+
+/* True if headers contain "Transfer-Encoding: ... chunked ...". */
+bool net_http_headers_chunked(const char *hdr, int hdr_end) {
+    const char want[] = "transfer-encoding:";
+    const int   wlen   = (int)sizeof(want) - 1;
+    int         a      = 0;
+    while (a < hdr_end) {
+        int b = a;
+        while (b < hdr_end && hdr[b] != '\n')
+            b++;
+        if (b <= a)
+            break;
+        int linelen = b - a;
+        if (linelen > 0 && hdr[b - 1] == '\r')
+            linelen--;
+        const char *ln = hdr + a;
+        if (linelen >= wlen && hdr_ci_eq(ln, want, wlen)) {
+            int h = wlen;
+            while (h < linelen && (ln[h] == ' ' || ln[h] == '\t'))
+                h++;
+            for (int i = h; i + 7 <= linelen; i++) {
+                if (!hdr_ci_eq(ln + i, "chunked", 7))
+                    continue;
+                if (i > h && ((unsigned char)ln[i - 1] > ' ' && ln[i - 1] != ',' && ln[i - 1] != ';'))
+                    continue;
+                char z = (i + 7 < linelen) ? ln[i + 7] : ' ';
+                if (z > ' ' && z != ',' && z != ';' && z != '\r')
+                    continue;
+                return true;
+            }
+        }
+        a = b + 1;
+    }
+    return false;
+}
+
+static int parse_chunk_hex(const char *line, int linelen) {
+    int val = 0;
+    int i   = 0;
+    while (i < linelen) {
+        char c = line[i];
+        if (c == ';' || c == ' ' || c == '\t')
+            break;
+        int d = -1;
+        if (c >= '0' && c <= '9')
+            d = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            d = c - 'A' + 10;
+        else
+            return -1;
+        val = (val << 4) | d;
+        if (val > (1 << 24))
+            return -1;
+        i++;
+    }
+    if (i == 0)
+        return -1;
+    return val;
+}
+
+/* Decode RFC 9112 chunked body from in -> out. Returns 0 or -1. */
+static int decode_chunked_core(const unsigned char *in, int inlen, unsigned char *out,
+                                 int out_max, int *out_len) {
+    int ip = 0, op = 0;
+    for (int guard = 0; guard < 4096; guard++) {
+        if (ip >= inlen)
+            return -1;
+        int line_beg = ip;
+        while (ip < inlen && in[ip] != '\n')
+            ip++;
+        if (ip >= inlen)
+            return -1;
+        int lf = ip++;
+        int line_len = lf - line_beg;
+        if (line_len > 0 && in[lf - 1] == '\r')
+            line_len--;
+        int chunk = parse_chunk_hex((const char *)(in + line_beg), line_len);
+        if (chunk < 0)
+            return -1;
+        if (chunk > inlen - ip)
+            return -1;
+        if (op + chunk > out_max)
+            return -1;
+        if (chunk > 0) {
+            mem_copy(out + op, in + ip, (uint32_t)chunk);
+            op += chunk;
+            ip += chunk;
+        }
+        if (ip + 1 < inlen && in[ip] == '\r' && in[ip + 1] == '\n')
+            ip += 2;
+        else if (ip < inlen && in[ip] == '\n')
+            ip++;
+        else
+            return -1;
+        if (chunk == 0) {
+            int t = ip;
+            while (t + 3 < inlen) {
+                if (in[t] == '\r' && in[t + 1] == '\n' && in[t + 2] == '\r' && in[t + 3] == '\n') {
+                    ip = t + 4;
+                    goto trailer_done;
+                }
+                t++;
+            }
+            if (ip + 1 < inlen && in[ip] == '\r' && in[ip + 1] == '\n')
+                ip += 2;
+        trailer_done:
+            *out_len = op;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int net_http_try_chunked_decode(char *buf, int *len_io, int max_size) {
+    int ilen = *len_io;
+    if (ilen <= 0)
+        return 0;
+    int olen = 0;
+    if (decode_chunked_core((const unsigned char *)buf, ilen, gunzip_scratch, GUNZIP_SCRATCH,
+                             &olen) != 0)
+        return -1;
+    if (olen > max_size - 1)
+        return -1;
+    mem_copy(buf, gunzip_scratch, (uint32_t)olen);
+    buf[olen] = '\0';
+    *len_io = olen;
+    return 0;
+}
+
+/* Locate deflate bitstream inside gzip member; return 0 on success. */
+static int gzip_deflate_bounds(const uint8_t *in, int inlen, int *d0, int *dlen) {
+    if (inlen < 18)
+        return -1;
+    if (in[0] != 0x1f || in[1] != 0x8b || in[2] != 8)
+        return -1;
+    uint8_t flg = in[3];
+    int     pos = 10;
+    if (flg & 4) {
+        if (pos + 2 > inlen)
+            return -1;
+        int xlen = in[pos] | (in[pos + 1] << 8);
+        pos += 2 + xlen;
+        if (pos > inlen)
+            return -1;
+    }
+    if (flg & 8) {
+        while (pos < inlen && in[pos])
+            pos++;
+        if (pos >= inlen)
+            return -1;
+        pos++;
+    }
+    if (flg & 16) {
+        while (pos < inlen && in[pos])
+            pos++;
+        if (pos >= inlen)
+            return -1;
+        pos++;
+    }
+    if (flg & 2) {
+        if (pos + 2 > inlen)
+            return -1;
+        pos += 2;
+    }
+    if (pos + 8 > inlen)
+        return -1;
+    *d0 = pos;
+    *dlen = inlen - pos - 8;
+    if (*dlen < 1)
+        return -1;
+    return 0;
+}
+
+int net_http_gunzip_if_needed(char *buf, int *len_io, int max_size) {
+    int              len = *len_io;
+    int              d0, dlen;
+    const uint8_t   *in = (const uint8_t *)buf;
+    if (gzip_deflate_bounds(in, len, &d0, &dlen) != 0)
+        return 0;
+
+    const uint8_t *src = in + d0;
+    unsigned long  srclen = (unsigned long)dlen;
+    unsigned long  destlen = 0;
+    int            pr = puff(NIL, &destlen, src, &srclen);
+    if (pr != 0)
+        return -1;
+    if (destlen > (unsigned long)(GUNZIP_SCRATCH - 1) ||
+        destlen > (unsigned long)(max_size - 1))
+        return -1;
+
+    unsigned long outl = destlen;
+    srclen = (unsigned long)dlen;
+    pr = puff(gunzip_scratch, &outl, src, &srclen);
+    if (pr != 0 || outl != destlen)
+        return -1;
+
+    mem_copy(buf, gunzip_scratch, (uint32_t)outl);
+    buf[outl] = '\0';
+    *len_io = (int)outl;
+    return 1;
+}
+
 int net_http_get(const char *url, char *buf, int max_size) {
     static char host[128];
     static char path[256];
@@ -1178,7 +1399,9 @@ int net_http_get(const char *url, char *buf, int max_size) {
     while (*v) req[ri++] = *v++;
     const char *hh = host;
     while (*hh) req[ri++] = *hh++;
-    const char *cl = "\r\nConnection: close\r\nUser-Agent: AI_OS/0.3\r\n\r\n";
+    const char *cl =
+        "\r\nConnection: close\r\nAccept-Encoding: identity\r\n"
+        "User-Agent: AI_OS/0.3\r\n\r\n";
     while (*cl) req[ri++] = *cl++;
     req[ri] = '\0';
 
@@ -1216,7 +1439,13 @@ int net_http_get(const char *url, char *buf, int max_size) {
 
     /* Shift body to start of buffer */
     int body_len = total - body_start;
+    bool chunked = net_http_headers_chunked(buf, body_start);
     mem_copy(buf, buf + body_start, (uint32_t)body_len);
+    buf[body_len] = '\0';
+    if (chunked)
+        (void)net_http_try_chunked_decode(buf, &body_len, max_size);
+    buf[body_len] = '\0';
+    (void)net_http_gunzip_if_needed(buf, &body_len, max_size);
     buf[body_len] = '\0';
     return body_len;
 }
