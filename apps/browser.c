@@ -320,6 +320,8 @@ static color_t parse_color(const char *val) {
     if (ci_eq(val, "linen"))     return COLOR_RGB(250, 240, 230);
     if (ci_eq(val, "ivory"))     return COLOR_RGB(255, 255, 240);
     if (ci_eq(val, "snow"))      return COLOR_RGB(255, 250, 250);
+    if (ci_eq(val, "transparent"))
+        return C_NONE;
 
     /* Hex: #RGB or #RRGGBB */
     if (val[0] == '#') {
@@ -453,9 +455,33 @@ static struct render_style *cur_style(void) {
     return &style_stack[style_depth];
 }
 
+/* First CSS display token is keyword "none" (allows trailing !important / ;). */
+static bool css_display_value_is_none(const char *val, int vi) {
+    int i = 0;
+    while (i < vi && val[i] == ' ')
+        i++;
+    const char *n = "none";
+    int         j = 0;
+    while (n[j] && i + j < vi) {
+        char c = val[i + j];
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c + 32);
+        if (c != n[j])
+            return false;
+        j++;
+    }
+    if (j != 4)
+        return false;
+    if (i + 4 == vi)
+        return true;
+    char t = val[i + 4];
+    return t == ' ' || t == '\t' || t == ';' || t == '!' || t == '/';
+}
+
 /* --- Parse CSS properties from a declaration block --- */
 
-static void apply_css_props(const char *css, int css_len, struct render_style *st) {
+static void apply_css_props(const char *css, int css_len, struct render_style *st,
+                            bool *display_property_seen) {
     int p = 0;
     while (p < css_len) {
         p = skip_ws(css, p, css_len);
@@ -554,7 +580,9 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
             else if (vc == 3) { st->margin_top = vals[0]; st->margin_left = st->margin_right = vals[1]; st->margin_bottom = vals[2]; }
             else if (vc == 4) { st->margin_top = vals[0]; st->margin_right = vals[1]; st->margin_bottom = vals[2]; st->margin_left = vals[3]; }
         } else if (ci_eq(prop, "display")) {
-            st->display_none = ci_eq(val, "none");
+            if (display_property_seen)
+                *display_property_seen = true;
+            st->display_none = css_display_value_is_none(val, vi);
         } else if (ci_eq(prop, "border")) {
             /* Shorthand: Npx solid COLOR */
             int bw = 1;
@@ -620,10 +648,9 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
             st->white_space_pre = ci_eq(val, "pre") || ci_eq(val, "pre-wrap");
         } else if (ci_eq(prop, "visibility")) {
             st->visibility_hidden = ci_eq(val, "hidden");
-        } else if (ci_eq(prop, "opacity")) {
-            int v = 0; parse_int(val, 0, vi, &v);
-            if (v == 0 && val[0] == '0') st->visibility_hidden = true;
         }
+        /* opacity: ignored — sites often use * { opacity: 0 } + animation; we have no
+         * animation engine, so mapping opacity to visibility hid entire pages. */
     }
 }
 
@@ -671,7 +698,8 @@ static void parse_css_rule_body(const char *body, int blen, struct css_rule *rul
     tmp.bg_color = C_NONE;
     tmp.border_bottom_color = C_HR;
 
-    apply_css_props(body, blen, &tmp);
+    bool display_prop = false;
+    apply_css_props(body, blen, &tmp, &display_prop);
 
     if (tmp.color != C_NONE) { rule->color = tmp.color; rule->has_color = true; }
     if (tmp.bg_color != C_NONE) { rule->bg_color = tmp.bg_color; rule->has_bg = true; }
@@ -686,7 +714,10 @@ static void parse_css_rule_body(const char *body, int blen, struct css_rule *rul
         rule->text_right = tmp.text_right;
         rule->has_text_align = true;
     }
-    if (tmp.display_none) { rule->display_none = true; rule->has_display = true; }
+    if (display_prop) {
+        rule->has_display = true;
+        rule->display_none = tmp.display_none;
+    }
     if (tmp.has_border_bottom) { rule->has_border_bottom = true; rule->border_bottom_color = tmp.border_bottom_color; }
     /* Extended properties */
     if (tmp.margin_left) { rule->margin_left = tmp.margin_left; rule->has_margin_left = true; }
@@ -2281,7 +2312,9 @@ static int measure_line_width(const char *pbuf, int plen, int pos, int start_x, 
                 tag_eq(tn, ti, "ol") || tag_eq(tn, ti, "tr") ||
                 tag_eq(tn, ti, "blockquote") || tag_eq(tn, ti, "main") ||
                 tag_eq(tn, ti, "figure") || tag_eq(tn, ti, "figcaption") ||
-                tag_eq(tn, ti, "noscript")))
+                tag_eq(tn, ti, "noscript") || tag_eq(tn, ti, "details") ||
+                tag_eq(tn, ti, "summary") || tag_eq(tn, ti, "fieldset") ||
+                tag_eq(tn, ti, "label")))
                 break;
             while (pos < plen && pbuf[pos] != '>') pos++;
             if (pos < plen) pos++;
@@ -2615,7 +2648,7 @@ void browser_render(void) {
                 char inline_style[128];
                 extract_attr(tag_full, tf, "style", inline_style, 128);
                 if (inline_style[0])
-                    apply_css_props(inline_style, str_len(inline_style), cur_style());
+                    apply_css_props(inline_style, str_len(inline_style), cur_style(), NULL);
 
                 if (cur_style()->display_none) {
                     /* Skip content - we still push/pop but don't render */
@@ -2644,7 +2677,9 @@ void browser_render(void) {
                            tag_eq(tag_name, tn, "aside") || tag_eq(tag_name, tn, "footer") ||
                            tag_eq(tag_name, tn, "header") || tag_eq(tag_name, tn, "nav") ||
                            tag_eq(tag_name, tn, "main") || tag_eq(tag_name, tn, "figure") ||
-                           tag_eq(tag_name, tn, "figcaption") || tag_eq(tag_name, tn, "noscript")) {
+                           tag_eq(tag_name, tn, "figcaption") || tag_eq(tag_name, tn, "noscript") ||
+                           tag_eq(tag_name, tn, "details") || tag_eq(tag_name, tn, "summary") ||
+                           tag_eq(tag_name, tn, "fieldset") || tag_eq(tag_name, tn, "label")) {
                     if (!closing) { draw_y += 6; draw_x = 8 + cur_style()->padding_left; }
                     else { draw_y += 8; draw_x = 8; }
                     is_block = true;
@@ -3395,6 +3430,8 @@ void browser_render(void) {
         } else {
             fg = st->color;
         }
+        if (fg == C_NONE)
+            fg = C_TEXT;
 
         int char_w = 8 + st->letter_spacing;
         int line_h = st->line_height ? st->line_height : 16;

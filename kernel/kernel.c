@@ -96,6 +96,14 @@ void kernel_main(void) {
     __asm__ __volatile__("sti");
     dbg_print("STI ok\n");
 
+    /* Auto-configure IPv4 from DHCP when a NIC is present (same as shell "dhcp"). */
+    if (have_nic) {
+        if (net_dhcp_discover())
+            dbg_print("DHCP ok\n");
+        else
+            dbg_print("DHCP: no lease\n");
+    }
+
     /* Phase 2: Try framebuffer first */
     fb_init();
     dbg_print(fb_available() ? "FB: YES\n" : "FB: NO\n");
