@@ -249,6 +249,13 @@ void wm_handle_event(struct gui_event *evt) {
                 break;
             }
         }
+    } else if (evt->type == EVT_MOUSE_SCROLL) {
+        int id = wm_hit_test(evt->mouse_x, evt->mouse_y);
+        if (id >= 0) {
+            struct window *win = &windows[id];
+            if (in_content(win, evt->mouse_x, evt->mouse_y) && win->on_event)
+                win->on_event(win, evt);
+        }
     } else if (evt->type == EVT_MOUSE_MOVE) {
         if (dragging && drag_id >= 0 && windows[drag_id].alive) {
             struct window *win = &windows[drag_id];

@@ -90,6 +90,7 @@ void keyboard_handler(void) {
                     evt.key = key;
                     evt.mouse_x = 0;
                     evt.mouse_y = 0;
+                    evt.scroll_delta = 0;
                     evt.mouse_button = 0;
                     event_push(&evt);
                 } else {
@@ -125,6 +126,7 @@ void keyboard_handler(void) {
                 evt.key = KEY_ALTTAB;
                 evt.mouse_x = 0;
                 evt.mouse_y = 0;
+                evt.scroll_delta = 0;
                 evt.mouse_button = 0;
                 event_push(&evt);
             }
@@ -165,6 +167,7 @@ void keyboard_handler(void) {
                     evt.key = (uint8_t)c;
                     evt.mouse_x = 0;
                     evt.mouse_y = 0;
+                    evt.scroll_delta = 0;
                     evt.mouse_button = 0;
                     event_push(&evt);
                 } else {

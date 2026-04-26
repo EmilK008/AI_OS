@@ -396,6 +396,7 @@ struct css_rule {
     int list_style; /* 0=disc, 1=none, 2=circle, 3=square */
     bool has_list_style;
     bool white_space_pre;
+    bool white_space_nowrap;
     bool has_white_space;
     bool visibility_hidden;
     bool has_visibility;
@@ -431,6 +432,7 @@ struct render_style {
     int letter_spacing;
     int list_style; /* 0=disc, 1=none, 2=circle, 3=square */
     bool white_space_pre;
+    bool white_space_nowrap; /* nowrap: no soft wrap at spaces / line width */
     bool visibility_hidden;
 };
 static struct render_style style_stack[STYLE_STACK_MAX];
@@ -646,6 +648,7 @@ static void apply_css_props(const char *css, int css_len, struct render_style *s
             else st->list_style = 0; /* disc */
         } else if (ci_eq(prop, "white-space")) {
             st->white_space_pre = ci_eq(val, "pre") || ci_eq(val, "pre-wrap");
+            st->white_space_nowrap = ci_eq(val, "nowrap");
         } else if (ci_eq(prop, "visibility")) {
             st->visibility_hidden = ci_eq(val, "hidden");
         }
@@ -685,7 +688,10 @@ static void apply_rule(struct css_rule *r, struct render_style *st) {
     if (r->has_line_height) st->line_height = r->line_height;
     if (r->has_letter_spacing) st->letter_spacing = r->letter_spacing;
     if (r->has_list_style) st->list_style = r->list_style;
-    if (r->has_white_space) st->white_space_pre = r->white_space_pre;
+    if (r->has_white_space) {
+        st->white_space_pre     = r->white_space_pre;
+        st->white_space_nowrap  = r->white_space_nowrap;
+    }
     if (r->has_visibility) st->visibility_hidden = r->visibility_hidden;
 }
 
@@ -732,7 +738,11 @@ static void parse_css_rule_body(const char *body, int blen, struct css_rule *rul
     if (tmp.line_height) { rule->line_height = tmp.line_height; rule->has_line_height = true; }
     if (tmp.letter_spacing) { rule->letter_spacing = tmp.letter_spacing; rule->has_letter_spacing = true; }
     if (tmp.list_style) { rule->list_style = tmp.list_style; rule->has_list_style = true; }
-    if (tmp.white_space_pre) { rule->white_space_pre = true; rule->has_white_space = true; }
+    if (tmp.white_space_pre || tmp.white_space_nowrap) {
+        rule->white_space_pre    = tmp.white_space_pre;
+        rule->white_space_nowrap = tmp.white_space_nowrap;
+        rule->has_white_space    = true;
+    }
     if (tmp.visibility_hidden) { rule->visibility_hidden = true; rule->has_visibility = true; }
 }
 
@@ -920,6 +930,8 @@ struct browser_tab {
     int addr_len;
     /* Resolved <base href> for same-origin relative links; empty = use addr_buf */
     char base_href[ADDR_MAX + 1];
+    /* First <title> text (for status bar); may be empty */
+    char doc_title[96];
     int scroll_y;
     int content_total_h;
     struct link_region links[MAX_LINKS];
@@ -1697,6 +1709,9 @@ static void parse_document_base(struct browser_tab *tab) {
     }
 }
 
+static void parse_document_title(struct browser_tab *tab);
+static void browser_status_ready(struct browser_tab *tab);
+
 /* Replace gzip-looking body with a readable message; then parse <base href>. */
 static void tab_post_fetch(struct browser_tab *tab) {
     if (tab->page_len >= 2 && (uint8_t)tab->page_buf[0] == 0x1f &&
@@ -1714,6 +1729,70 @@ static void tab_post_fetch(struct browser_tab *tab) {
         tab->page_len = ml;
     }
     parse_document_base(tab);
+    parse_document_title(tab);
+}
+
+/* First <title>...</title> in the head (best-effort, case-insensitive). */
+static void parse_document_title(struct browser_tab *tab) {
+    tab->doc_title[0] = '\0';
+    char *pg = tab->page_buf;
+    int   pl = tab->page_len;
+    int   lim = pl < 32000 ? pl : 32000;
+    for (int p = 0; p + 7 < lim; p++) {
+        if (pg[p] != '<')
+            continue;
+        int u = p + 1;
+        while (u < lim && pg[u] == ' ')
+            u++;
+        if (u + 5 >= lim)
+            break;
+        if (to_lower(pg[u]) != 't' || to_lower(pg[u + 1]) != 'i' || to_lower(pg[u + 2]) != 't' ||
+            to_lower(pg[u + 3]) != 'l' || to_lower(pg[u + 4]) != 'e')
+            continue;
+        u += 5;
+        if (u < lim && ((pg[u] >= 'a' && pg[u] <= 'z') || (pg[u] >= 'A' && pg[u] <= 'Z')))
+            continue;
+        while (u < lim && pg[u] != '>')
+            u++;
+        if (u >= lim || pg[u] != '>')
+            continue;
+        int inner_start = u + 1;
+        int inner_end   = pl;
+        for (int q = inner_start; q + 8 <= pl; q++) {
+            if (pg[q] != '<')
+                continue;
+            if (to_lower(pg[q + 1]) != '/')
+                continue;
+            if (to_lower(pg[q + 2]) != 't' || to_lower(pg[q + 3]) != 'i' ||
+                to_lower(pg[q + 4]) != 't' || to_lower(pg[q + 5]) != 'l' ||
+                to_lower(pg[q + 6]) != 'e')
+                continue;
+            if (q + 7 >= pl || pg[q + 7] != '>')
+                continue;
+            inner_end = q;
+            break;
+        }
+        int x = inner_start, y = inner_end;
+        while (x < y && (pg[x] == ' ' || pg[x] == '\t' || pg[x] == '\n' || pg[x] == '\r'))
+            x++;
+        while (y > x && (pg[y - 1] == ' ' || pg[y - 1] == '\t' || pg[y - 1] == '\n' || pg[y - 1] == '\r'))
+            y--;
+        int tl = y - x;
+        if (tl > 95)
+            tl = 95;
+        if (tl > 0) {
+            mem_copy(tab->doc_title, pg + x, (uint32_t)tl);
+            tab->doc_title[tl] = '\0';
+        }
+        return;
+    }
+}
+
+static void browser_status_ready(struct browser_tab *tab) {
+    if (tab->doc_title[0])
+        str_ncopy(status_msg, tab->doc_title, 64);
+    else
+        str_copy(status_msg, "Ready");
 }
 
 /* Fetch page content from filesystem or HTTP */
@@ -1742,7 +1821,16 @@ static int fetch_content(const char *url, char *buf, int max_size) {
     return len;
 }
 
+/* True when we should prepend https:// then fall back to http:// (not a local file). */
+static bool browser_url_needs_auto_scheme(const char *s) {
+    if (!s || !s[0]) return false;
+    if (str_starts_with(s, "http://") || str_starts_with(s, "https://")) return false;
+    if (fs_find(s) >= 0) return false;
+    return true;
+}
+
 static void load_page(struct browser_tab *tab, const char *filename) {
+    tab->doc_title[0] = '\0';
     if (tab->addr_len > 0 && tab->history_count < HISTORY_MAX) {
         str_copy(tab->history[tab->history_count], tab->addr_buf);
         tab->history_count++;
@@ -1754,24 +1842,49 @@ static void load_page(struct browser_tab *tab, const char *filename) {
     tab->addr_buf[i] = '\0';
     tab->addr_len = i;
 
-    /* Show loading status for HTTP / HTTPS */
-    if (str_starts_with(filename, "http://") ||
-        str_starts_with(filename, "https://"))
+    char fetch_url[ADDR_MAX + 16];
+    str_copy(fetch_url, filename);
+    bool auto_scheme = browser_url_needs_auto_scheme(filename);
+    if (auto_scheme) {
+        int flen = str_len(filename);
+        if (flen + 9 >= (int)sizeof(fetch_url))
+            auto_scheme = false;
+        else {
+            mem_copy(fetch_url, "https://", 8);
+            mem_copy(fetch_url + 8, filename, (uint32_t)flen);
+            fetch_url[8 + flen] = '\0';
+        }
+    }
+
+    if (str_starts_with(fetch_url, "http://") || str_starts_with(fetch_url, "https://"))
         str_copy(status_msg, "Loading...");
 
-    int result = fetch_content(filename, tab->page_buf, PAGE_BUF_SIZE);
+    int result = fetch_content(fetch_url, tab->page_buf, PAGE_BUF_SIZE);
+    if (result < 0 && auto_scheme && str_starts_with(fetch_url, "https://")) {
+        int flen = str_len(filename);
+        mem_copy(fetch_url, "http://", 7);
+        mem_copy(fetch_url + 7, filename, (uint32_t)flen);
+        fetch_url[7 + flen] = '\0';
+        result = fetch_content(fetch_url, tab->page_buf, PAGE_BUF_SIZE);
+    }
+
+    if (result >= 0 && str_starts_with(fetch_url, "http"))
+        str_copy(tab->addr_buf, fetch_url);
+
+    if (result >= 0)
+        tab->addr_len = str_len(tab->addr_buf);
+
     if (result < 0) {
         const char *err;
-        if (str_starts_with(filename, "http://") ||
-            str_starts_with(filename, "https://"))
+        if (str_starts_with(fetch_url, "http://") || str_starts_with(fetch_url, "https://"))
             err = "<h1>Network Error</h1><p>Could not fetch: ";
         else
             err = "<h1>File Not Found</h1><p>Could not find: ";
         int elen = str_len(err);
         mem_copy(tab->page_buf, err, (uint32_t)elen);
         int pos = elen;
-        for (int j = 0; filename[j] && pos < PAGE_BUF_SIZE - 10; j++)
-            tab->page_buf[pos++] = filename[j];
+        for (int j = 0; fetch_url[j] && pos < PAGE_BUF_SIZE - 10; j++)
+            tab->page_buf[pos++] = fetch_url[j];
         tab->page_buf[pos++] = '<'; tab->page_buf[pos++] = '/';
         tab->page_buf[pos++] = 'p'; tab->page_buf[pos++] = '>';
         tab->page_len = pos;
@@ -1789,7 +1902,7 @@ static void load_page(struct browser_tab *tab, const char *filename) {
     tab->hovered_link = -1;
     tab->form_field_count = 0;
     tab->focused_field = -1;
-    str_copy(status_msg, "Ready");
+    browser_status_ready(tab);
 }
 
 static void navigate_back(struct browser_tab *tab) {
@@ -1822,7 +1935,7 @@ static void navigate_back(struct browser_tab *tab) {
     tab->hovered_link = -1;
     tab->form_field_count = 0;
     tab->focused_field = -1;
-    str_copy(status_msg, "Ready");
+    browser_status_ready(tab);
 }
 
 static void navigate_forward(struct browser_tab *tab) {
@@ -1855,7 +1968,7 @@ static void navigate_forward(struct browser_tab *tab) {
     tab->hovered_link = -1;
     tab->form_field_count = 0;
     tab->focused_field = -1;
-    str_copy(status_msg, "Ready");
+    browser_status_ready(tab);
 }
 
 /* ---- Tab management ---- */
@@ -1943,6 +2056,26 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
                     js_set_var(prompt_target_var, prompt_input);
             }
         }
+        return;
+    }
+
+    if (evt->type == EVT_MOUSE_SCROLL) {
+        int mx = evt->mouse_x - (win->x + BORDER_WIDTH);
+        int my = evt->mouse_y - (win->y + TITLEBAR_HEIGHT);
+        if (my < CONTENT_Y || my >= CONTENT_Y + CONTENT_H || mx < 0 || mx >= BRW_W)
+            return;
+        if (T->content_total_h <= CONTENT_H)
+            return;
+        int z = (int)evt->scroll_delta;
+        if (z == 0)
+            return;
+        /* ~3 lines per wheel step (same order of magnitude as arrow keys). */
+        T->scroll_y += z * 48;
+        if (T->scroll_y < 0)
+            T->scroll_y = 0;
+        int max_scroll = T->content_total_h - CONTENT_H;
+        if (T->scroll_y > max_scroll)
+            T->scroll_y = max_scroll;
         return;
     }
 
@@ -2251,7 +2384,7 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
                 }
             }
         }
-        str_copy(status_msg, "Ready");
+        browser_status_ready(T);
     }
 }
 
@@ -2263,7 +2396,6 @@ void browser_create(void) {
         if (w && w->alive && w->on_event == brw_on_event) { wm_focus_window(win_id); return; }
     }
     win_id = wm_create_window("Browser", 40, 30, BRW_W, BRW_H, brw_on_event, NULL);
-    str_copy(status_msg, "Ready");
     tab_count = 0;
     active_tab = 0;
     for (int i = 0; i < MAX_TABS; i++) tabs[i].used = false;
@@ -2291,8 +2423,8 @@ static int measure_word(const char *pbuf, int plen, int pos) {
     return chars * 8;
 }
 
-/* Measure line width for text alignment */
-static int measure_line_width(const char *pbuf, int plen, int pos, int start_x, int max_w) {
+/* Measure line width for text alignment (nowrap = one visual line until block break). */
+static int measure_line_width(const char *pbuf, int plen, int pos, int start_x, int max_w, bool nowrap) {
     int x = start_x;
     while (pos < plen) {
         char c = pbuf[pos];
@@ -2314,7 +2446,7 @@ static int measure_line_width(const char *pbuf, int plen, int pos, int start_x, 
                 tag_eq(tn, ti, "figure") || tag_eq(tn, ti, "figcaption") ||
                 tag_eq(tn, ti, "noscript") || tag_eq(tn, ti, "details") ||
                 tag_eq(tn, ti, "summary") || tag_eq(tn, ti, "fieldset") ||
-                tag_eq(tn, ti, "label")))
+                tag_eq(tn, ti, "label") || tag_eq(tn, ti, "center")))
                 break;
             while (pos < plen && pbuf[pos] != '>') pos++;
             if (pos < plen) pos++;
@@ -2323,9 +2455,9 @@ static int measure_line_width(const char *pbuf, int plen, int pos, int start_x, 
         if (c == '\n' || c == '\r') { pos++; continue; }
         if (c == ' ') {
             int ww = measure_word(pbuf, plen, pos + 1);
-            if (ww > 0 && x + 8 + ww > max_w) break;
+            if (!nowrap && ww > 0 && x + 8 + ww > max_w) break;
         }
-        if (x + 8 > max_w) break;
+        if (!nowrap && x + 8 > max_w) break;
         x += 8;
         pos++;
     }
@@ -2682,6 +2814,16 @@ void browser_render(void) {
                            tag_eq(tag_name, tn, "fieldset") || tag_eq(tag_name, tn, "label")) {
                     if (!closing) { draw_y += 6; draw_x = 8 + cur_style()->padding_left; }
                     else { draw_y += 8; draw_x = 8; }
+                    is_block = true;
+                } else if (tag_eq(tag_name, tn, "center")) {
+                    if (!closing) {
+                        draw_y += 6;
+                        draw_x = 8 + cur_style()->padding_left;
+                        cur_style()->text_center = true;
+                    } else {
+                        draw_y += 8;
+                        draw_x = 8;
+                    }
                     is_block = true;
                 } else if (tag_eq(tag_name, tn, "blockquote")) {
                     if (!closing) { draw_y += 4; draw_x = 32 + cur_style()->padding_left; }
@@ -3401,7 +3543,7 @@ void browser_render(void) {
         if (st->visibility_hidden) {
             int char_w = 8 + st->letter_spacing;
             draw_x += char_w;
-            if (draw_x + char_w > max_x) {
+            if (!st->white_space_nowrap && draw_x + char_w > max_x) {
                 draw_y += st->line_height ? st->line_height : 16;
                 draw_x = 8 + st->padding_left + st->margin_left;
                 line_start = true;
@@ -3438,7 +3580,7 @@ void browser_render(void) {
 
         if (c == ' ') {
             int ww = measure_word(page_buf, page_len, pos);
-            if (ww > 0 && draw_x + char_w + ww > max_x) {
+            if (!st->white_space_nowrap && ww > 0 && draw_x + char_w + ww > max_x) {
                 draw_y += line_h;
                 draw_x = (in_list ? 24 : 8) + st->padding_left + st->margin_left;
                 line_start = true;
@@ -3447,7 +3589,7 @@ void browser_render(void) {
             }
         }
 
-        if (draw_x + char_w > max_x) {
+        if (!st->white_space_nowrap && draw_x + char_w > max_x) {
             draw_y += line_h;
             draw_x = (in_list ? 24 : 8) + st->padding_left + st->margin_left;
             line_start = true;
@@ -3455,7 +3597,7 @@ void browser_render(void) {
 
         if (line_start && (st->text_center || st->text_right)) {
             int base_x = draw_x;
-            int lw = measure_line_width(page_buf, page_len, pos - 1, base_x, max_x);
+            int lw = measure_line_width(page_buf, page_len, pos - 1, base_x, max_x, st->white_space_nowrap);
             if (st->text_center)
                 draw_x = base_x + (max_x - base_x - lw) / 2;
             else if (st->text_right)

@@ -14,7 +14,8 @@ static volatile bool    button_middle = false;
 static volatile bool    click_left = false;
 static volatile bool    click_right = false;
 static volatile int     packet_byte = 0;
-static volatile uint8_t packet[3];
+static volatile uint8_t packet[4];
+static bool             scroll_wheel_enabled = false;
 static int max_x = 640;
 static int max_y = 480;
 static int mouse_speed = 2;  /* 1=slow, 2=normal, 3=fast */
@@ -45,6 +46,12 @@ static uint8_t mouse_read(void) {
     return inb(0x60);
 }
 
+/* Send byte to mouse; consume 0xFA ACK. Returns false if not ACK. */
+static bool mouse_send_byte(uint8_t b) {
+    mouse_write(b);
+    return mouse_read() == 0xFA;
+}
+
 void mouse_init(void) {
     /* Enable auxiliary device */
     mouse_wait_input();
@@ -70,103 +77,135 @@ void mouse_init(void) {
     mouse_write(0xF4);
     mouse_read(); /* ACK */
 
+    /* Intellimouse: try to enable scroll wheel (4-byte packets, id 3 or 4). */
+    scroll_wheel_enabled = false;
+    if (mouse_send_byte(0xF3) && mouse_send_byte(200) &&
+        mouse_send_byte(0xF3) && mouse_send_byte(100) &&
+        mouse_send_byte(0xF3) && mouse_send_byte(80) &&
+        mouse_send_byte(0xF2)) {
+        uint8_t id = mouse_read();
+        if (id == 3 || id == 4)
+            scroll_wheel_enabled = true;
+    }
+
     packet_byte = 0;
 }
 
 void mouse_handler(void) {
     uint8_t data = inb(0x60);
+    int need = scroll_wheel_enabled ? 4 : 3;
 
-    switch (packet_byte) {
-        case 0:
-            /* Byte 0: flags. Bit 3 must be set (sync) */
-            if (!(data & 0x08)) {
-                /* Out of sync, discard */
-                break;
-            }
-            packet[0] = data;
-            packet_byte = 1;
-            break;
-        case 1:
-            packet[1] = data;
-            packet_byte = 2;
-            break;
-        case 2:
-            packet[2] = data;
-            packet_byte = 0;
-
-            /* Decode packet */
-            int32_t dx = (int32_t)packet[1];
-            int32_t dy = (int32_t)packet[2];
-
-            /* Sign extend */
-            if (packet[0] & 0x10) dx |= 0xFFFFFF00;
-            if (packet[0] & 0x20) dy |= 0xFFFFFF00;
-
-            /* Discard if overflow */
-            if (packet[0] & 0xC0) break;
-
-            /* PS/2 Y-axis is inverted */
-            dy = -dy;
-
-            /* Apply mouse speed scaling (1=slow, 2=normal, 3=fast) */
-            dx = dx * mouse_speed / 2;
-            dy = dy * mouse_speed / 2;
-
-            /* Update absolute position */
-            mouse_x += dx;
-            mouse_y += dy;
-
-            if (mouse_x < 0) mouse_x = 0;
-            if (mouse_y < 0) mouse_y = 0;
-            if (mouse_x >= max_x) mouse_x = max_x - 1;
-            if (mouse_y >= max_y) mouse_y = max_y - 1;
-
-            /* Track button state edges */
-            bool new_left  = (packet[0] & 0x01) != 0;
-            bool new_right = (packet[0] & 0x02) != 0;
-            bool new_mid   = (packet[0] & 0x04) != 0;
-
-            /* Push events */
-            struct gui_event evt;
-            evt.mouse_x = mouse_x;
-            evt.mouse_y = mouse_y;
-            evt.key = 0;
-
-            /* Button press events */
-            if (new_left && !button_left) {
-                evt.type = EVT_MOUSE_DOWN;
-                evt.mouse_button = 0;
-                event_push(&evt);
-                click_left = true;
-            }
-            if (!new_left && button_left) {
-                evt.type = EVT_MOUSE_UP;
-                evt.mouse_button = 0;
-                event_push(&evt);
-            }
-            if (new_right && !button_right) {
-                evt.type = EVT_MOUSE_DOWN;
-                evt.mouse_button = 1;
-                event_push(&evt);
-                click_right = true;
-            }
-            if (!new_right && button_right) {
-                evt.type = EVT_MOUSE_UP;
-                evt.mouse_button = 1;
-                event_push(&evt);
-            }
-
-            button_left  = new_left;
-            button_right = new_right;
-            button_middle = new_mid;
-
-            /* Move event */
-            evt.type = EVT_MOUSE_MOVE;
-            evt.mouse_button = (new_left ? 1 : 0) | (new_right ? 2 : 0);
-            event_push(&evt);
-            break;
+    if (packet_byte == 0) {
+        if (!(data & 0x08))
+            goto eoi;
+        packet[0] = data;
+        packet_byte = 1;
+        goto eoi;
+    }
+    if (packet_byte == 1) {
+        packet[1] = data;
+        packet_byte = 2;
+        goto eoi;
+    }
+    if (packet_byte == 2) {
+        packet[2] = data;
+        if (need == 4) {
+            packet_byte = 3;
+            goto eoi;
+        }
+        packet_byte = 0;
+    } else if (packet_byte == 3) {
+        packet[3] = data;
+        packet_byte = 0;
+    } else {
+        packet_byte = 0;
+        goto eoi;
     }
 
+    /* Full packet (3 bytes without wheel, 4 bytes with wheel) */
+    {
+        int32_t dx = (int32_t)packet[1];
+        int32_t dy = (int32_t)packet[2];
+
+        if (packet[0] & 0x10) dx |= 0xFFFFFF00;
+        if (packet[0] & 0x20) dy |= 0xFFFFFF00;
+
+        if (packet[0] & 0xC0)
+            goto eoi;
+
+        dy = -dy;
+
+        dx = dx * mouse_speed / 2;
+        dy = dy * mouse_speed / 2;
+
+        mouse_x += dx;
+        mouse_y += dy;
+
+        if (mouse_x < 0) mouse_x = 0;
+        if (mouse_y < 0) mouse_y = 0;
+        if (mouse_x >= max_x) mouse_x = max_x - 1;
+        if (mouse_y >= max_y) mouse_y = max_y - 1;
+
+        bool new_left  = (packet[0] & 0x01) != 0;
+        bool new_right = (packet[0] & 0x02) != 0;
+        bool new_mid   = (packet[0] & 0x04) != 0;
+
+        struct gui_event evt;
+        evt.mouse_x = mouse_x;
+        evt.mouse_y = mouse_y;
+        evt.key = 0;
+        evt.scroll_delta = 0;
+
+        if (new_left && !button_left) {
+            evt.type = EVT_MOUSE_DOWN;
+            evt.mouse_button = 0;
+            event_push(&evt);
+            click_left = true;
+        }
+        if (!new_left && button_left) {
+            evt.type = EVT_MOUSE_UP;
+            evt.mouse_button = 0;
+            event_push(&evt);
+        }
+        if (new_right && !button_right) {
+            evt.type = EVT_MOUSE_DOWN;
+            evt.mouse_button = 1;
+            event_push(&evt);
+            click_right = true;
+        }
+        if (!new_right && button_right) {
+            evt.type = EVT_MOUSE_UP;
+            evt.mouse_button = 1;
+            event_push(&evt);
+        }
+
+        button_left   = new_left;
+        button_right  = new_right;
+        button_middle = new_mid;
+
+        if (scroll_wheel_enabled) {
+            int z = (int8_t)packet[3];
+            if (z > 7 || z < -7)
+                z = (z > 0) ? 1 : -1;
+            if (z > 3) z = 3;
+            if (z < -3) z = -3;
+            if (z != 0) {
+                evt.type = EVT_MOUSE_SCROLL;
+                evt.scroll_delta = (int8_t)z;
+                evt.mouse_button = 0;
+                event_push(&evt);
+            }
+        }
+
+        if (dx != 0 || dy != 0) {
+            evt.type = EVT_MOUSE_MOVE;
+            evt.scroll_delta = 0;
+            evt.mouse_button = (new_left ? 1 : 0) | (new_right ? 2 : 0);
+            event_push(&evt);
+        }
+    }
+
+eoi:
     /* EOI to slave and master PIC */
     outb(0xA0, 0x20);
     outb(0x20, 0x20);
