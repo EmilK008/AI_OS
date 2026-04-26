@@ -29,6 +29,167 @@ static void auto_save(void) {
         fs_save_to_disk();
 }
 
+/* ===========================================================================
+ * Demo media generators (PIC2 image + PVID animation)
+ *
+ * These produce binary asset files programmatically so the browser has
+ * something to render out of the box. The encoding matches what
+ * apps/browser.c expects:
+ *
+ *   PIC2  -> "PIC2" + w(LE16) + h(LE16) + RLE pairs (run, R, G, B)
+ *   PVID  -> "PVID" + fps(u8) + count(u8) + w(LE16) + h(LE16) +
+ *            (per frame) frame_len(LE32) + PIC2 RLE body
+ * =========================================================================== */
+
+/* Compute (R,G,B) for a position in the demo animation. The output is the
+ * background pattern; the caller overlays a moving highlight on top. */
+static void demo_bg_color(int x, int y, int frame, uint8_t *r, uint8_t *g, uint8_t *b) {
+    /* Vertical rainbow that scrolls upward as `frame` advances. Each row
+     * gets a single color so the RLE encoder can compact each row into
+     * one or two pairs (excellent compression). */
+    int hue = ((y * 7) - frame * 6) & 0xFF; /* 0..255 */
+    int seg = hue / 43;                     /* 6 segments */
+    int rem = (hue - seg * 43) * 6;          /* 0..255-ish */
+    if (rem > 255) rem = 255;
+    int rr = 0, gg = 0, bb = 0;
+    switch (seg) {
+        case 0: rr = 255;       gg = rem;      bb = 0;       break;
+        case 1: rr = 255 - rem; gg = 255;      bb = 0;       break;
+        case 2: rr = 0;         gg = 255;      bb = rem;     break;
+        case 3: rr = 0;         gg = 255 - rem; bb = 255;    break;
+        case 4: rr = rem;       gg = 0;         bb = 255;    break;
+        default:rr = 255;       gg = 0;         bb = 255 - rem; break;
+    }
+    /* Damp to ~70% so the highlight pops on top */
+    *r = (uint8_t)((rr * 180) / 255 + 20);
+    *g = (uint8_t)((gg * 180) / 255 + 20);
+    *b = (uint8_t)((bb * 180) / 255 + 20);
+    (void)x;
+}
+
+/* RLE-encode one row of pixels into `out` starting at position `pos`.
+ * Returns the new write offset. Each run is (count<=255, R, G, B). */
+static int demo_emit_row(char *out, int pos,
+                         const uint8_t *row_r, const uint8_t *row_g,
+                         const uint8_t *row_b, int w) {
+    int i = 0;
+    while (i < w) {
+        int run = 1;
+        while (i + run < w && run < 255 &&
+               row_r[i + run] == row_r[i] &&
+               row_g[i + run] == row_g[i] &&
+               row_b[i + run] == row_b[i]) {
+            run++;
+        }
+        out[pos++] = (char)run;
+        out[pos++] = (char)row_r[i];
+        out[pos++] = (char)row_g[i];
+        out[pos++] = (char)row_b[i];
+        i += run;
+    }
+    return pos;
+}
+
+/* Fill row[w] with the demo pattern for a given frame and y. The highlight
+ * is a small white dot that travels in a horizontal sine-like loop. */
+static void demo_render_row(int w, int y, int frame, int total_frames,
+                            uint8_t *row_r, uint8_t *row_g, uint8_t *row_b) {
+    /* Spot moves left -> right across the visible area, with a slight
+     * vertical bob so it traces a wide oval. */
+    int spot_x = (frame * w) / total_frames;
+    /* Bob: piecewise linear approximation of sin */
+    int phase = (frame * 4) / total_frames; /* 0..3 then wrap */
+    int bob_table[4] = { 0, 4, 0, -4 };
+    int spot_y = (24 + bob_table[phase & 3]);
+    for (int x = 0; x < w; x++) {
+        uint8_t r, g, b;
+        demo_bg_color(x, y, frame, &r, &g, &b);
+        int dx = x - spot_x;
+        int dy = y - spot_y;
+        int dist2 = dx * dx + dy * dy;
+        if (dist2 < 16) {
+            /* Bright core */
+            r = 255; g = 255; b = 255;
+        } else if (dist2 < 64) {
+            /* Soft glow: blend toward white based on inverse distance */
+            int weight = 64 - dist2;
+            r = (uint8_t)(r + ((255 - r) * weight) / 64);
+            g = (uint8_t)(g + ((255 - g) * weight) / 64);
+            b = (uint8_t)(b + ((255 - b) * weight) / 64);
+        }
+        /* Subtle dark band at the very top to anchor the composition */
+        if (y < 3) { r = 0; g = 0; b = 0; }
+        row_r[x] = r; row_g[x] = g; row_b[x] = b;
+    }
+}
+
+/* Shared scratch buffer for both demo encoders. Any file we generate must
+ * fit inside MAX_FILE_DATA anyway, so sizing this to that cap keeps .bss
+ * lean (one ~64 KB buffer instead of one per asset). */
+static char demo_scratch[MAX_FILE_DATA + 64];
+
+static void gen_demo_image(void) {
+    const int W = 96, H = 48;
+    int idx = fs_create("ai_logo.pic2", FS_FILE);
+    if (idx < 0) return;
+    char *out = demo_scratch;
+    int pos = 0;
+    out[pos++] = 'P'; out[pos++] = 'I'; out[pos++] = 'C'; out[pos++] = '2';
+    out[pos++] = (char)(W & 0xFF); out[pos++] = (char)((W >> 8) & 0xFF);
+    out[pos++] = (char)(H & 0xFF); out[pos++] = (char)((H >> 8) & 0xFF);
+    /* Single-frame: render frame 0 of the animation (no spotlight) */
+    uint8_t row_r[96], row_g[96], row_b[96];
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            uint8_t r, g, b;
+            demo_bg_color(x, y, 0, &r, &g, &b);
+            /* Diagonal sparkle band for visual interest */
+            int diag = (x + y) & 0x1F;
+            if (diag == 0 || diag == 8 || diag == 16) {
+                r = (uint8_t)((r + 255) / 2);
+                g = (uint8_t)((g + 255) / 2);
+                b = (uint8_t)((b + 255) / 2);
+            }
+            row_r[x] = r; row_g[x] = g; row_b[x] = b;
+        }
+        pos = demo_emit_row(out, pos, row_r, row_g, row_b, W);
+    }
+    fs_write_file(idx, out, (uint32_t)pos);
+}
+
+static void gen_demo_video(void) {
+    const int W = 96, H = 48;
+    const int FPS = 12;
+    const int FRAMES = 24;
+    int idx = fs_create("wave.pvid", FS_FILE);
+    if (idx < 0) return;
+    char *out = demo_scratch;
+    int pos = 0;
+    out[pos++] = 'P'; out[pos++] = 'V'; out[pos++] = 'I'; out[pos++] = 'D';
+    out[pos++] = (char)FPS;
+    out[pos++] = (char)FRAMES;
+    out[pos++] = (char)(W & 0xFF); out[pos++] = (char)((W >> 8) & 0xFF);
+    out[pos++] = (char)(H & 0xFF); out[pos++] = (char)((H >> 8) & 0xFF);
+    uint8_t row_r[96], row_g[96], row_b[96];
+    for (int f = 0; f < FRAMES; f++) {
+        /* Reserve 4 bytes for length prefix; fill it in after */
+        int len_pos = pos;
+        pos += 4;
+        int body_start = pos;
+        for (int y = 0; y < H; y++) {
+            demo_render_row(W, y, f, FRAMES, row_r, row_g, row_b);
+            pos = demo_emit_row(out, pos, row_r, row_g, row_b, W);
+        }
+        uint32_t flen = (uint32_t)(pos - body_start);
+        out[len_pos + 0] = (char)(flen & 0xFF);
+        out[len_pos + 1] = (char)((flen >> 8) & 0xFF);
+        out[len_pos + 2] = (char)((flen >> 16) & 0xFF);
+        out[len_pos + 3] = (char)((flen >> 24) & 0xFF);
+        if ((uint32_t)pos > MAX_FILE_DATA - 8) break; /* safety */
+    }
+    fs_write_file(idx, out, (uint32_t)pos);
+}
+
 void fs_init(void) {
     for (int i = 0; i < MAX_FILES; i++) {
         nodes[i].used = false;
@@ -117,9 +278,48 @@ void fs_init_defaults(void) {
             "<a href=\"jsdemo.htm\">JS demo</a> | "
             "<a href=\"tabledemo.htm\">tables demo</a></p>"
             "<!-- Navigation hints -->"
+            "<!-- Image + video demo -->"
+            "<hr>"
+            "<h2>Pictures &amp; Video</h2>"
+            "<p><img src=\"ai_logo.pic2\" alt=\"AI_OS logo\" width=\"192\" height=\"96\"></p>"
+            "<p><video src=\"wave.pvid\" width=\"192\" height=\"96\" controls loop autoplay></video></p>"
+            "<p><a href=\"media.htm\">More image &amp; video demos</a></p>"
             "<p>Scroll: PgUp/PgDn | Back: Backspace</p>"
             "<p>Tabs: Ctrl+T new | Ctrl+W close</p>";
         fs_write_file(home, htm, str_len(htm));
+    }
+
+    /* Generate the binary media assets referenced by home.htm. They are
+     * created after the HTML files so the load order in fs_init_defaults
+     * is: directories -> text/HTML -> generated media. */
+    gen_demo_image();
+    gen_demo_video();
+
+    /* Dedicated media demo page */
+    int media = fs_create("media.htm", FS_FILE);
+    if (media >= 0) {
+        const char *htm =
+            "<style>"
+            "h1 { color: steelblue; text-align: center; }"
+            "h2 { color: crimson; }"
+            ".note { background: lightyellow; padding: 6; margin: 6; }"
+            "</style>"
+            "<h1>Media Demo</h1>"
+            "<h2>Image (PIC2 — true color RLE)</h2>"
+            "<p>Default size:</p><p><img src=\"ai_logo.pic2\" alt=\"logo\"></p>"
+            "<p>Stretched 2x:</p><p><img src=\"ai_logo.pic2\" alt=\"logo\" width=\"192\" height=\"96\"></p>"
+            "<p>Wide banner (cover):</p><p><img src=\"ai_logo.pic2\" alt=\"logo\" width=\"320\" height=\"40\" fit=\"cover\"></p>"
+            "<h2>Video (PVID — animated frames)</h2>"
+            "<p>With controls — click to play/pause:</p>"
+            "<p><video src=\"wave.pvid\" width=\"288\" height=\"144\" controls loop autoplay></video></p>"
+            "<div class=\"note\">"
+            "<p>Supported formats:</p>"
+            "<p>Images: <b>PIC</b> (16-color RLE), <b>PIC2</b> (true-color RLE), "
+            "<b>BMP</b> (24-bit), <b>PPM</b> (P6 raw RGB)</p>"
+            "<p>Videos: <b>PVID</b> (animated PIC2 frames, 1-60 fps, up to 255 frames)</p>"
+            "</div>"
+            "<p><a href=\"home.htm\">Home</a> | <a href=\"features.htm\">Features</a></p>";
+        fs_write_file(media, htm, str_len(htm));
     }
 
     /* Create CSS demo page */

@@ -1,0 +1,42 @@
+AI_OS boot
+HEAP: start=0x00200000 size=0x02000000 end=0x02200000
+MEM ok
+IDT ok
+TMR ok
+KBD/EVT/MOUSE ok
+ATA: drive ok
+ATA ok
+PCI: 6 devices
+PCI ok
+RTL: not found
+NIC: not found
+ALLOC big: 0x00010040 used=0x00010040
+ALLOC big: 0x00010040 used=0x00020080
+ALLOC big: 0x00010040 used=0x000300C0
+ALLOC big: 0x00010040 used=0x00040100
+ALLOC big: 0x00010040 used=0x00050140
+ALLOC big: 0x00010040 used=0x00060180
+ALLOC big: 0x00010040 used=0x000701C0
+ALLOC big: 0x00010040 used=0x00080200
+ALLOC big: 0x00010040 used=0x00090240
+DISK: loaded ok
+DISK: loaded
+ALLOC big: 0x00010040 used=0x000A0280
+ALLOC big: 0x00010040 used=0x000B02C0
+ALLOC big: 0x00010040 used=0x000C0300
+DISK: defaults added
+FS/PROC ok
+STI ok
+ALLOC big: 0x0012C040 used=0x001EC340
+FB: YES
+GUI: clear
+GUI: splash
+GUI: flip done
+GUI: desktop
+GUI: wm
+GUI: settings loaded
+GUI: terminal
+ALLOC big: 0x000EA040 used=0x002D6380
+GUI: modes
+GUI: spawn shell
+GUI: entering loop

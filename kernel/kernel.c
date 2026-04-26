@@ -75,8 +75,13 @@ void kernel_main(void) {
     fs_init();
     if (have_disk && fs_load_from_disk() == 0) {
         dbg_print("DISK: loaded\n");
-        /* Ensure default files exist even after disk load */
-        if (fs_find("home.htm") < 0 || fs_find("demo.htm") < 0) {
+        /* Ensure default files exist even after disk load. The media demo
+         * files (ai_logo.pic2, wave.pvid, media.htm) were added later, so
+         * older disks may be missing them — re-seed defaults if any of the
+         * required entries are absent. */
+        if (fs_find("home.htm") < 0 || fs_find("demo.htm") < 0 ||
+            fs_find("ai_logo.pic2") < 0 || fs_find("wave.pvid") < 0 ||
+            fs_find("media.htm") < 0) {
             fs_init_defaults();
             dbg_print("DISK: defaults added\n");
         }

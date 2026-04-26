@@ -57,7 +57,11 @@
 #define HISTORY_MAX 16
 
 /* ===========================================================================
- * Image Support (PIC format)
+ * Image Support — multi-format (PIC, PIC2, BMP, PPM/P6)
+ *
+ * All decoders write into a single shared 32-bit RGB buffer (img_tc_buf).
+ * The <img> tag dispatches based on file magic; the <video> tag uses the
+ * PVID container which carries PIC2-style RLE frames (see further down).
  * =========================================================================== */
 
 #define PIC_PAL_COUNT 16
@@ -72,66 +76,298 @@ static const color_t brw_palette[PIC_PAL_COUNT] = {
     COLOR_RGB(128, 128, 128),  COLOR_RGB(200, 200, 200),
 };
 
-#define IMG_MAX_W 400
-#define IMG_MAX_H 300
-static uint8_t img_decode_buf[IMG_MAX_W * IMG_MAX_H];
+/* Decoded-image buffer: shared by static images and animated frames so we
+ * pay the ~256 KB once. 256x192 fits comfortably inside the kernel heap and
+ * is plenty for the 484x336 browser window. */
+#define IMG_MAX_W 256
+#define IMG_MAX_H 192
+static color_t img_tc_buf[IMG_MAX_W * IMG_MAX_H];
 
+/* Fill the entire decoded buffer with a single color (used as background
+ * before partial RLE frames or on decode failure). */
+static void img_tc_clear(int w, int h, color_t c) {
+    int n = w * h;
+    if (n > IMG_MAX_W * IMG_MAX_H) n = IMG_MAX_W * IMG_MAX_H;
+    for (int i = 0; i < n; i++) img_tc_buf[i] = c;
+}
+
+/* PIC: 16-color paletted, run-length encoded.
+ *   Header: 'P','I','C', w_lo, w_hi, h_lo, h_hi
+ *   Body:   pairs of (run_count, palette_index) until h*w pixels written.
+ * The original demo format — kept for back-compat with existing .pic files. */
 static bool pic_decode(const char *data, int size, int *out_w, int *out_h) {
     if (size < 7) return false;
     if (data[0] != 'P' || data[1] != 'I' || data[2] != 'C') return false;
+    /* Reject PIC2 here so the caller can fall through to the true-color path */
+    if (size >= 4 && data[3] == '2') return false;
     int w = (uint8_t)data[3] | ((uint8_t)data[4] << 8);
     int h = (uint8_t)data[5] | ((uint8_t)data[6] << 8);
     if (w <= 0 || h <= 0) return false;
-    if (w > IMG_MAX_W) w = IMG_MAX_W;
-    if (h > IMG_MAX_H) h = IMG_MAX_H;
-    mem_set(img_decode_buf, 1, (uint32_t)(w * h));
-    int real_w = (uint8_t)data[3] | ((uint8_t)data[4] << 8);
-    int real_h = (uint8_t)data[5] | ((uint8_t)data[6] << 8);
+    int dw = w > IMG_MAX_W ? IMG_MAX_W : w;
+    int dh = h > IMG_MAX_H ? IMG_MAX_H : h;
+    img_tc_clear(dw, dh, brw_palette[1]);
     int pos = 7;
-    for (int y = 0; y < real_h; y++) {
+    for (int y = 0; y < h; y++) {
         int x = 0;
-        while (x < real_w && pos + 1 < size) {
+        while (x < w && pos + 1 < size) {
             int run = (uint8_t)data[pos++];
             uint8_t val = (uint8_t)data[pos++];
             if (val >= PIC_PAL_COUNT) val = 0;
-            for (int i = 0; i < run && x < real_w; i++) {
-                if (y < h && x < w)
-                    img_decode_buf[y * w + x] = val;
+            color_t c = brw_palette[val];
+            for (int i = 0; i < run && x < w; i++) {
+                if (y < dh && x < dw)
+                    img_tc_buf[y * dw + x] = c;
                 x++;
             }
         }
     }
-    *out_w = w;
-    *out_h = h;
+    *out_w = dw; *out_h = dh;
     return true;
 }
 
-/* Blit decoded PIC image with nearest-neighbor scaling.
- * dec_w = stride of img_decode_buf (decoded width from pic_decode).
- * src_w/src_h = visible region size within decoded image.
- * dst_w/dst_h = display size on screen.
- * ox/oy = source offset for cropping (used by cover fit). */
-static void brw_blit_pic(color_t *buf, int cw, int ch __attribute__((unused)),
-                          int dx, int dy, int dec_w,
-                          int src_w, int src_h,
-                          int dst_w, int dst_h,
-                          int ox, int oy, int scroll_y) {
+/* PIC2: true-color RLE.
+ *   Header: 'P','I','C','2', w_lo, w_hi, h_lo, h_hi
+ *   Body:   pairs of (run_count:1, R:1, G:1, B:1) — 4 bytes per run, run<=255.
+ * Decode writes into img_tc_buf at the cropped (capped) dimensions. */
+static bool pic2_decode_body(const char *data, int size, int pos,
+                             int w, int h, int dw, int dh) {
+    int total = w * h;
+    int written = 0;
+    while (written < total && pos + 3 < size) {
+        int run = (uint8_t)data[pos++];
+        uint8_t r = (uint8_t)data[pos++];
+        uint8_t g = (uint8_t)data[pos++];
+        uint8_t b = (uint8_t)data[pos++];
+        color_t c = COLOR_RGB(r, g, b);
+        for (int i = 0; i < run && written < total; i++) {
+            int x = written % w;
+            int y = written / w;
+            if (x < dw && y < dh)
+                img_tc_buf[y * dw + x] = c;
+            written++;
+        }
+    }
+    return written > 0;
+}
+
+static bool pic2_decode(const char *data, int size, int *out_w, int *out_h) {
+    if (size < 8) return false;
+    if (data[0] != 'P' || data[1] != 'I' || data[2] != 'C' || data[3] != '2') return false;
+    int w = (uint8_t)data[4] | ((uint8_t)data[5] << 8);
+    int h = (uint8_t)data[6] | ((uint8_t)data[7] << 8);
+    if (w <= 0 || h <= 0) return false;
+    int dw = w > IMG_MAX_W ? IMG_MAX_W : w;
+    int dh = h > IMG_MAX_H ? IMG_MAX_H : h;
+    img_tc_clear(dw, dh, COLOR_RGB(20, 20, 20));
+    if (!pic2_decode_body(data, size, 8, w, h, dw, dh)) return false;
+    *out_w = dw; *out_h = dh;
+    return true;
+}
+
+/* BMP: 24-bit uncompressed Windows bitmap (BITMAPINFOHEADER).
+ * Rows are bottom-up and padded to 4 bytes; pixels are stored BGR. */
+static bool bmp_decode(const char *data, int size, int *out_w, int *out_h) {
+    if (size < 54) return false;
+    if (data[0] != 'B' || data[1] != 'M') return false;
+    uint32_t pix_off = (uint8_t)data[10] | ((uint8_t)data[11] << 8) |
+                       ((uint8_t)data[12] << 16) | ((uint8_t)data[13] << 24);
+    int dib = (uint8_t)data[14] | ((uint8_t)data[15] << 8) |
+              ((uint8_t)data[16] << 16) | ((uint8_t)data[17] << 24);
+    if (dib < 40) return false;
+    int w = (int)((uint8_t)data[18] | ((uint8_t)data[19] << 8) |
+                  ((uint8_t)data[20] << 16) | ((uint8_t)data[21] << 24));
+    int h_signed = (int)((uint8_t)data[22] | ((uint8_t)data[23] << 8) |
+                         ((uint8_t)data[24] << 16) | ((uint8_t)data[25] << 24));
+    int bpp = (uint8_t)data[28] | ((uint8_t)data[29] << 8);
+    int comp = (uint8_t)data[30] | ((uint8_t)data[31] << 8) |
+               ((uint8_t)data[32] << 16) | ((uint8_t)data[33] << 24);
+    if (bpp != 24 || comp != 0) return false;
+    bool top_down = h_signed < 0;
+    int h = top_down ? -h_signed : h_signed;
+    if (w <= 0 || h <= 0) return false;
+    int dw = w > IMG_MAX_W ? IMG_MAX_W : w;
+    int dh = h > IMG_MAX_H ? IMG_MAX_H : h;
+    img_tc_clear(dw, dh, COLOR_RGB(20, 20, 20));
+    int row_stride = ((w * 3 + 3) / 4) * 4;
+    for (int y = 0; y < h; y++) {
+        int src_row = top_down ? y : (h - 1 - y);
+        int row_off = (int)pix_off + src_row * row_stride;
+        if (row_off < 0 || row_off + w * 3 > size) continue;
+        if (y >= dh) continue;
+        for (int x = 0; x < w; x++) {
+            if (x >= dw) break;
+            uint8_t b = (uint8_t)data[row_off + x * 3 + 0];
+            uint8_t g = (uint8_t)data[row_off + x * 3 + 1];
+            uint8_t r = (uint8_t)data[row_off + x * 3 + 2];
+            img_tc_buf[y * dw + x] = COLOR_RGB(r, g, b);
+        }
+    }
+    *out_w = dw; *out_h = dh;
+    return true;
+}
+
+/* PPM: Netpbm P6 — raw 8-bit RGB after a tiny ASCII header.
+ *   "P6\n<width> <height>\n<maxval>\n<R G B bytes...>"
+ * The parser tolerates any whitespace and # comment lines per the spec. */
+static bool ppm_decode(const char *data, int size, int *out_w, int *out_h) {
+    if (size < 11) return false;
+    if (data[0] != 'P' || data[1] != '6') return false;
+    int pos = 2;
+    int nums[3] = {0, 0, 0};
+    int got = 0;
+    while (got < 3 && pos < size) {
+        char c = data[pos];
+        if (c == '#') {
+            while (pos < size && data[pos] != '\n') pos++;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { pos++; continue; }
+        if (c < '0' || c > '9') return false;
+        int v = 0;
+        while (pos < size && data[pos] >= '0' && data[pos] <= '9') {
+            v = v * 10 + (data[pos] - '0');
+            pos++;
+        }
+        nums[got++] = v;
+    }
+    if (got < 3) return false;
+    if (pos < size && (data[pos] == ' ' || data[pos] == '\t' ||
+                        data[pos] == '\n' || data[pos] == '\r')) pos++;
+    int w = nums[0], h = nums[1], maxval = nums[2];
+    if (w <= 0 || h <= 0 || maxval <= 0 || maxval > 255) return false;
+    int dw = w > IMG_MAX_W ? IMG_MAX_W : w;
+    int dh = h > IMG_MAX_H ? IMG_MAX_H : h;
+    img_tc_clear(dw, dh, COLOR_RGB(20, 20, 20));
+    int scale = maxval == 255 ? 1 : 0;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            if (pos + 2 >= size) goto done;
+            uint8_t r = (uint8_t)data[pos++];
+            uint8_t g = (uint8_t)data[pos++];
+            uint8_t b = (uint8_t)data[pos++];
+            if (!scale) {
+                r = (uint8_t)((int)r * 255 / maxval);
+                g = (uint8_t)((int)g * 255 / maxval);
+                b = (uint8_t)((int)b * 255 / maxval);
+            }
+            if (x < dw && y < dh)
+                img_tc_buf[y * dw + x] = COLOR_RGB(r, g, b);
+        }
+    }
+done:
+    *out_w = dw; *out_h = dh;
+    return true;
+}
+
+/* Front-end: try each decoder in order; on success img_tc_buf holds the
+ * decoded pixels and out_w / out_h hold the (capped) dimensions. */
+static bool image_decode_any(const char *data, int size, int *out_w, int *out_h) {
+    if (!data || size < 4) return false;
+    if (data[0] == 'P' && data[1] == 'I' && data[2] == 'C' && data[3] == '2')
+        return pic2_decode(data, size, out_w, out_h);
+    if (data[0] == 'P' && data[1] == 'I' && data[2] == 'C')
+        return pic_decode(data, size, out_w, out_h);
+    if (data[0] == 'B' && data[1] == 'M')
+        return bmp_decode(data, size, out_w, out_h);
+    if (data[0] == 'P' && data[1] == '6')
+        return ppm_decode(data, size, out_w, out_h);
+    return false;
+}
+
+/* Blit decoded image (true-color buffer) with nearest-neighbor scaling.
+ * dec_w        = stride of img_tc_buf (decoded width).
+ * src_w/src_h  = visible region size within decoded image.
+ * dst_w/dst_h  = display size on screen.
+ * ox/oy        = source offset for cropping (used by cover fit). */
+static void brw_blit_image(color_t *buf, int cw, int ch __attribute__((unused)),
+                            int dx, int dy, int dec_w,
+                            int src_w, int src_h,
+                            int dst_w, int dst_h,
+                            int ox, int oy, int scroll_y) {
+    if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return;
     for (int y = 0; y < dst_h; y++) {
         int screen_y = CONTENT_Y + dy + y - scroll_y;
         if (screen_y < CONTENT_Y) continue;
         if (screen_y >= CONTENT_Y + CONTENT_H) break;
         int sy = oy + (y * src_h) / dst_h;
         if (sy < 0 || sy >= oy + src_h) continue;
+        if (sy >= IMG_MAX_H) continue;
         for (int x = 0; x < dst_w; x++) {
             int screen_x = dx + x;
             if (screen_x < 0 || screen_x >= cw) continue;
             int sx = ox + (x * src_w) / dst_w;
             if (sx < 0 || sx >= ox + src_w) continue;
-            uint8_t idx = img_decode_buf[sy * dec_w + sx];
-            if (idx < PIC_PAL_COUNT)
-                buf[screen_y * cw + screen_x] = brw_palette[idx];
+            if (sx >= dec_w || sx >= IMG_MAX_W) continue;
+            buf[screen_y * cw + screen_x] = img_tc_buf[sy * dec_w + sx];
         }
     }
+}
+
+/* ===========================================================================
+ * Video Support — PVID format
+ *
+ *   Header (10 bytes):
+ *     'P','V','I','D'         magic
+ *     fps                     1 byte (1..60)
+ *     frame_count             1 byte (1..255)
+ *     w_lo, w_hi              uint16 LE
+ *     h_lo, h_hi              uint16 LE
+ *
+ *   Frames: concatenated, each preceded by a 4-byte little-endian length:
+ *     len_b0..len_b3          uint32 LE (length of frame body in bytes)
+ *     <body>                  PIC2-style RLE: (run, R, G, B) until w*h pixels
+ *
+ * Length prefixes let the decoder skip frames without scanning RLE.
+ * =========================================================================== */
+
+#define PVID_HDR_SIZE 10
+
+static bool pvid_parse_header(const char *data, int size,
+                              int *out_fps, int *out_count,
+                              int *out_w, int *out_h) {
+    if (size < PVID_HDR_SIZE) return false;
+    if (data[0] != 'P' || data[1] != 'V' || data[2] != 'I' || data[3] != 'D')
+        return false;
+    int fps = (uint8_t)data[4];
+    int cnt = (uint8_t)data[5];
+    int w = (uint8_t)data[6] | ((uint8_t)data[7] << 8);
+    int h = (uint8_t)data[8] | ((uint8_t)data[9] << 8);
+    if (fps < 1) fps = 1;
+    if (fps > 60) fps = 60;
+    if (cnt < 1 || w <= 0 || h <= 0) return false;
+    *out_fps = fps; *out_count = cnt;
+    *out_w = w; *out_h = h;
+    return true;
+}
+
+/* Decode frame `frame_idx` from a PVID file into img_tc_buf.
+ * On success returns true; fills dec_w / dec_h with the (possibly-cropped)
+ * stored dimensions. On failure leaves img_tc_buf in a defined state. */
+static bool pvid_decode_frame(const char *data, int size, int frame_idx,
+                              int *dec_w, int *dec_h) {
+    int fps, cnt, w, h;
+    if (!pvid_parse_header(data, size, &fps, &cnt, &w, &h)) return false;
+    if (frame_idx < 0) frame_idx = 0;
+    if (frame_idx >= cnt) frame_idx = cnt - 1;
+
+    int pos = PVID_HDR_SIZE;
+    for (int f = 0; f < cnt; f++) {
+        if (pos + 4 > size) return false;
+        uint32_t flen = (uint8_t)data[pos] | ((uint8_t)data[pos+1] << 8) |
+                        ((uint8_t)data[pos+2] << 16) | ((uint8_t)data[pos+3] << 24);
+        pos += 4;
+        if (pos + (int)flen > size) return false;
+        if (f == frame_idx) {
+            int dw = w > IMG_MAX_W ? IMG_MAX_W : w;
+            int dh = h > IMG_MAX_H ? IMG_MAX_H : h;
+            img_tc_clear(dw, dh, COLOR_RGB(20, 20, 20));
+            pic2_decode_body(data, pos + (int)flen, pos, w, h, dw, dh);
+            *dec_w = dw; *dec_h = dh;
+            return true;
+        }
+        pos += (int)flen;
+    }
+    return false;
 }
 
 /* Clickable link regions */
@@ -831,6 +1067,36 @@ static void apply_css_for_tag(const char *tag_name, const char *class_name,
 
 /* --- Extract attribute values from tag_full --- */
 
+/* Locate a (possibly value-less) attribute in a tag's interior. Returns
+ * the index of the first character of the attribute name on success, or
+ * -1 if not present. The attribute is considered present even if it has
+ * no value (e.g. <video autoplay>). The match is case-insensitive and
+ * requires a name boundary on each side so "autoplay" doesn't match
+ * "data-autoplay" or similar. */
+static int str_find_attr(const char *tag, int tlen, const char *attr_name) {
+    int alen = str_len(attr_name);
+    if (alen <= 0) return -1;
+    for (int i = 0; i + alen <= tlen; i++) {
+        /* Left boundary: start of tag or whitespace */
+        if (i > 0 && tag[i - 1] != ' ' && tag[i - 1] != '\t' &&
+            tag[i - 1] != '\n' && tag[i - 1] != '\r')
+            continue;
+        bool match = true;
+        for (int j = 0; j < alen; j++) {
+            if (to_lower(tag[i + j]) != to_lower(attr_name[j])) { match = false; break; }
+        }
+        if (!match) continue;
+        /* Right boundary: end-of-tag, space, '=', '>', or '/' */
+        int j = i + alen;
+        if (j >= tlen) return i;
+        char c = tag[j];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+            c == '=' || c == '>' || c == '/')
+            return i;
+    }
+    return -1;
+}
+
 static void extract_attr(const char *tag, int tlen, const char *attr_name, char *out, int max) {
     out[0] = '\0';
     int alen = str_len(attr_name);
@@ -947,6 +1213,21 @@ struct browser_tab {
     char forward[HISTORY_MAX][ADDR_MAX + 1];
     int forward_count;
     bool used;
+
+    /* Active <video> playback state. Only one video plays at a time per
+     * tab; src is empty when no video is on the current page. The render
+     * path updates these fields each frame, and brw_on_event reads them
+     * to detect clicks on the play/pause control. */
+    char video_src[ADDR_MAX + 1];
+    int  video_frame;
+    int  video_frame_count;
+    int  video_fps;
+    bool video_playing;
+    bool video_loop;
+    uint32_t video_last_tick;
+    /* Last on-screen rectangle of the video display (window coordinates,
+     * relative to window top-left). Used for click-hit testing. */
+    int video_screen_x, video_screen_y, video_screen_w, video_screen_h;
 };
 
 static struct browser_tab tabs[MAX_TABS];
@@ -1829,7 +2110,46 @@ static bool browser_url_needs_auto_scheme(const char *s) {
     return true;
 }
 
+/* Clear the active <video> binding for a tab. Called on navigation so a
+ * stale src/frame doesn't get re-applied to the next page. */
+static void tab_video_reset(struct browser_tab *tab) {
+    tab->video_src[0] = '\0';
+    tab->video_frame = 0;
+    tab->video_frame_count = 0;
+    tab->video_fps = 0;
+    tab->video_playing = false;
+    tab->video_loop = false;
+    tab->video_last_tick = 0;
+    tab->video_screen_x = tab->video_screen_y = 0;
+    tab->video_screen_w = tab->video_screen_h = 0;
+}
+
+/* Advance the active video's frame index based on elapsed PIT ticks (100Hz).
+ * Called once per browser_render at the start of the frame. */
+static void tab_video_advance(struct browser_tab *tab) {
+    if (!tab->video_src[0] || !tab->video_playing) return;
+    if (tab->video_fps <= 0 || tab->video_frame_count <= 0) return;
+    uint32_t now = timer_get_ticks();
+    uint32_t ticks_per_frame = 100u / (uint32_t)tab->video_fps;
+    if (ticks_per_frame == 0) ticks_per_frame = 1;
+    uint32_t elapsed = now - tab->video_last_tick;
+    if (elapsed < ticks_per_frame) return;
+    int advance = (int)(elapsed / ticks_per_frame);
+    tab->video_last_tick += advance * ticks_per_frame;
+    int next = tab->video_frame + advance;
+    if (next >= tab->video_frame_count) {
+        if (tab->video_loop) {
+            next %= tab->video_frame_count;
+        } else {
+            next = tab->video_frame_count - 1;
+            tab->video_playing = false;
+        }
+    }
+    tab->video_frame = next;
+}
+
 static void load_page(struct browser_tab *tab, const char *filename) {
+    tab_video_reset(tab);
     tab->doc_title[0] = '\0';
     if (tab->addr_len > 0 && tab->history_count < HISTORY_MAX) {
         str_copy(tab->history[tab->history_count], tab->addr_buf);
@@ -1907,6 +2227,7 @@ static void load_page(struct browser_tab *tab, const char *filename) {
 
 static void navigate_back(struct browser_tab *tab) {
     if (tab->history_count <= 0) return;
+    tab_video_reset(tab);
     /* Save current page to forward history */
     if (tab->addr_len > 0 && tab->forward_count < HISTORY_MAX) {
         str_copy(tab->forward[tab->forward_count], tab->addr_buf);
@@ -1940,6 +2261,7 @@ static void navigate_back(struct browser_tab *tab) {
 
 static void navigate_forward(struct browser_tab *tab) {
     if (tab->forward_count <= 0) return;
+    tab_video_reset(tab);
     /* Save current page to back history */
     if (tab->addr_len > 0 && tab->history_count < HISTORY_MAX) {
         str_copy(tab->history[tab->history_count], tab->addr_buf);
@@ -2278,6 +2600,39 @@ static void brw_on_event(struct window *win, struct gui_event *evt) {
 
         /* Content area: scrollbar, link clicks and form field clicks */
         if (my >= CONTENT_Y && my < CONTENT_Y + CONTENT_H) {
+            /* Video play/pause button (controls bar at the bottom of the
+             * video rect, ~14px tall, leftmost 16px). The video_screen_*
+             * fields are in window coords (already include scroll offset)
+             * so we compare directly against mx/my. */
+            if (T->video_src[0] && T->video_screen_w > 0 && T->video_screen_h > 16) {
+                int vx = T->video_screen_x;
+                int vy = T->video_screen_y;
+                int vw = T->video_screen_w;
+                int vh = T->video_screen_h;
+                int bar_h = 14;
+                int bar_y = vy + vh - bar_h;
+                /* Toggle playback when the play/pause icon (16px wide) is
+                 * clicked; clicking elsewhere on the bar also toggles. */
+                if (mx >= vx && mx < vx + vw &&
+                    my >= bar_y && my < bar_y + bar_h) {
+                    T->video_playing = !T->video_playing;
+                    if (T->video_playing && T->video_frame >= T->video_frame_count - 1)
+                        T->video_frame = 0;
+                    T->video_last_tick = timer_get_ticks();
+                    return;
+                }
+                /* Click on the video body (above the controls bar) also
+                 * toggles play/pause — convenient YouTube-style UX. */
+                if (mx >= vx && mx < vx + vw &&
+                    my >= vy && my < bar_y) {
+                    T->video_playing = !T->video_playing;
+                    if (T->video_playing && T->video_frame >= T->video_frame_count - 1)
+                        T->video_frame = 0;
+                    T->video_last_tick = timer_get_ticks();
+                    return;
+                }
+            }
+
             /* Scrollbar click/drag */
             if (mx >= BRW_W - SCROLLBAR_W - 2 && T->content_total_h > CONTENT_H) {
                 int track_h = CONTENT_H - 4;
@@ -2469,6 +2824,10 @@ void browser_render(void) {
     struct window *win = wm_get_window(win_id);
     if (!win || !win->alive || !win->content || win->on_event != brw_on_event) { win_id = -1; return; }
     if (!T->used) return;
+
+    /* Advance the active <video> frame (if any) before rendering, so the
+     * next blit picks up the new frame index. */
+    tab_video_advance(T);
 
     int cw = win->content_w;
     int ch = win->content_h;
@@ -3345,7 +3704,9 @@ void browser_render(void) {
                     else { draw_y += 4; draw_x = 8; }
                     is_block = true;
                 } else if (tag_eq(tag_name, tn, "img") && !closing) {
-                    /* Self-closing <img> tag with width/height/fit */
+                    /* Self-closing <img> tag with width/height/fit.
+                     * Supports PIC (16-color), PIC2 (true-color RLE), BMP
+                     * (24-bit), and PPM/P6 (raw RGB). */
                     char img_src[ADDR_MAX + 1];
                     char img_alt[32];
                     char attr_w[16], attr_h[16], attr_fit[16];
@@ -3361,14 +3722,12 @@ void browser_render(void) {
                         if (fidx >= 0) {
                             struct fs_node *fnode = fs_get_node(fidx);
                             if (fnode && fnode->type == FS_FILE && fnode->data) {
-                                img_ok = pic_decode(fnode->data, (int)fnode->size, &img_w, &img_h);
+                                img_ok = image_decode_any(fnode->data, (int)fnode->size, &img_w, &img_h);
                             }
                         }
                     }
                     if (img_ok && img_w > 0 && img_h > 0) {
-                        /* Source (decoded) dimensions */
                         int src_w = img_w, src_h = img_h;
-                        /* Target display dimensions */
                         int dst_w = img_w, dst_h = img_h;
                         int want_w = attr_w[0] ? str_to_int(attr_w) : 0;
                         int want_h = attr_h[0] ? str_to_int(attr_h) : 0;
@@ -3383,37 +3742,30 @@ void browser_render(void) {
                         }
                         if (dst_w < 1) dst_w = 1;
                         if (dst_h < 1) dst_h = 1;
-                        /* fit modes: contain, cover, stretch (default) */
                         int blit_src_w = src_w, blit_src_h = src_h;
                         int ox = 0, oy = 0;
                         if (str_eq(attr_fit, "contain") && (want_w > 0 || want_h > 0)) {
-                            /* Fit inside dst box preserving aspect ratio */
                             int fw = dst_w, fh = (src_h * dst_w) / src_w;
                             if (fh > dst_h) { fh = dst_h; fw = (src_w * dst_h) / src_h; }
                             dst_w = fw > 0 ? fw : 1;
                             dst_h = fh > 0 ? fh : 1;
                         } else if (str_eq(attr_fit, "cover") && (want_w > 0 || want_h > 0)) {
-                            /* Fill dst box, crop excess (center crop) */
                             int scale_w = (src_w * dst_h) / src_h;
                             int scale_h = (src_h * dst_w) / src_w;
                             if (scale_w >= dst_w) {
-                                /* Scale to match height, crop width */
                                 blit_src_w = (src_w * dst_w) / scale_w;
                                 ox = (src_w - blit_src_w) / 2;
                                 blit_src_h = src_h;
                             } else {
-                                /* Scale to match width, crop height */
                                 blit_src_h = (src_h * dst_h) / scale_h;
                                 oy = (src_h - blit_src_h) / 2;
                                 blit_src_w = src_w;
                             }
                         }
-                        /* stretch is the default — just use dst_w/dst_h directly */
-                        brw_blit_pic(buf, cw, ch, draw_x, draw_y, src_w,
-                                     blit_src_w, blit_src_h, dst_w, dst_h, ox, oy, T->scroll_y);
+                        brw_blit_image(buf, cw, ch, draw_x, draw_y, src_w,
+                                       blit_src_w, blit_src_h, dst_w, dst_h, ox, oy, T->scroll_y);
                         draw_y += dst_h + 4;
                     } else {
-                        /* Show [alt] fallback */
                         int sy = CONTENT_Y + draw_y - T->scroll_y;
                         if (sy >= CONTENT_Y && sy + 16 <= CONTENT_Y + CONTENT_H) {
                             brw_char_transparent(buf, cw, ch, draw_x, sy, '[', COLOR_RGB(180, 60, 60));
@@ -3431,6 +3783,153 @@ void browser_render(void) {
                     }
                     draw_x = 8 + cur_style()->padding_left;
                     style_pop(); /* <img> is void — pop the style pushed for it */
+                    is_block = true;
+                    last_was_space = true;
+                    line_start = true;
+                } else if (tag_eq(tag_name, tn, "video") && !closing) {
+                    /* <video src="..." width="..." height="..." fit="..."
+                     *        autoplay loop controls> — plays a PVID file.
+                     * Only the first <video> on a page becomes the active
+                     * tab video; later ones still render the current frame
+                     * but don't get tab-tracked playback. */
+                    char vid_src[ADDR_MAX + 1];
+                    char attr_w[16], attr_h[16], attr_fit[16];
+                    extract_attr(tag_full, tf, "src", vid_src, ADDR_MAX);
+                    extract_attr(tag_full, tf, "width", attr_w, 16);
+                    extract_attr(tag_full, tf, "height", attr_h, 16);
+                    extract_attr(tag_full, tf, "fit", attr_fit, 16);
+                    bool has_autoplay = (str_find_attr(tag_full, tf, "autoplay") >= 0);
+                    bool has_loop     = (str_find_attr(tag_full, tf, "loop") >= 0);
+                    bool has_controls = (str_find_attr(tag_full, tf, "controls") >= 0);
+
+                    /* Read the PVID file and parse its header */
+                    bool vid_ok = false;
+                    int vid_fps = 0, vid_count = 0, vid_w = 0, vid_h = 0;
+                    const char *vid_data = (char *)0;
+                    int vid_size = 0;
+                    if (vid_src[0]) {
+                        int fidx = fs_find(vid_src);
+                        if (fidx >= 0) {
+                            struct fs_node *fnode = fs_get_node(fidx);
+                            if (fnode && fnode->type == FS_FILE && fnode->data) {
+                                vid_data = fnode->data;
+                                vid_size = (int)fnode->size;
+                                vid_ok = pvid_parse_header(vid_data, vid_size,
+                                                           &vid_fps, &vid_count,
+                                                           &vid_w, &vid_h);
+                            }
+                        }
+                    }
+
+                    if (vid_ok) {
+                        /* Bind / re-bind the tab's active video state. We
+                         * only treat one video on the page as "the tab's
+                         * video" — the first one we encounter while
+                         * rendering a fresh frame. */
+                        bool bind_to_tab = (T->video_src[0] == '\0' ||
+                                            !str_eq(T->video_src, vid_src));
+                        if (bind_to_tab) {
+                            str_ncopy(T->video_src, vid_src, ADDR_MAX);
+                            T->video_frame_count = vid_count;
+                            T->video_fps = vid_fps;
+                            T->video_frame = 0;
+                            T->video_playing = has_autoplay;
+                            T->video_loop = has_loop;
+                            T->video_last_tick = timer_get_ticks();
+                        }
+
+                        int src_w = vid_w, src_h = vid_h;
+                        int dst_w = vid_w, dst_h = vid_h;
+                        int want_w = attr_w[0] ? str_to_int(attr_w) : 0;
+                        int want_h = attr_h[0] ? str_to_int(attr_h) : 0;
+                        if (want_w > 0 && want_h > 0) { dst_w = want_w; dst_h = want_h; }
+                        else if (want_w > 0) { dst_w = want_w; dst_h = (src_h * want_w) / src_w; }
+                        else if (want_h > 0) { dst_h = want_h; dst_w = (src_w * want_h) / src_h; }
+                        if (dst_w < 1) dst_w = 1;
+                        if (dst_h < 1) dst_h = 1;
+                        if (str_eq(attr_fit, "contain") && (want_w > 0 || want_h > 0)) {
+                            int fw = dst_w, fh = (src_h * dst_w) / src_w;
+                            if (fh > dst_h) { fh = dst_h; fw = (src_w * dst_h) / src_h; }
+                            dst_w = fw > 0 ? fw : 1;
+                            dst_h = fh > 0 ? fh : 1;
+                        }
+
+                        /* Decode the current frame into img_tc_buf */
+                        int frame_idx = T->video_frame;
+                        int dec_w = src_w, dec_h = src_h;
+                        bool decoded = pvid_decode_frame(vid_data, vid_size, frame_idx,
+                                                         &dec_w, &dec_h);
+                        if (decoded) {
+                            brw_blit_image(buf, cw, ch, draw_x, draw_y, dec_w,
+                                           src_w, src_h, dst_w, dst_h, 0, 0, T->scroll_y);
+                        }
+
+                        /* Save on-screen rect for click hit-testing */
+                        T->video_screen_x = draw_x;
+                        T->video_screen_y = CONTENT_Y + draw_y - T->scroll_y;
+                        T->video_screen_w = dst_w;
+                        T->video_screen_h = dst_h;
+
+                        /* Draw the controls bar (play/pause + frame counter) */
+                        if (has_controls) {
+                            int bar_h = 14;
+                            int bar_y = CONTENT_Y + draw_y - T->scroll_y + dst_h - bar_h;
+                            if (bar_y >= CONTENT_Y && bar_y + bar_h <= CONTENT_Y + CONTENT_H) {
+                                brw_rect(buf, cw, ch, draw_x, bar_y, dst_w, bar_h,
+                                         COLOR_RGB(20, 20, 30));
+                                /* Play/pause icon at left in a 16px slot */
+                                int btn_x = draw_x + 2;
+                                int btn_y = bar_y + 2;
+                                color_t icon = COLOR_RGB(220, 220, 220);
+                                if (T->video_playing) {
+                                    /* Pause: two vertical bars */
+                                    brw_rect(buf, cw, ch, btn_x + 1, btn_y, 3, 10, icon);
+                                    brw_rect(buf, cw, ch, btn_x + 6, btn_y, 3, 10, icon);
+                                } else {
+                                    /* Play: rough triangle made of stacked bars */
+                                    for (int ti = 0; ti < 5; ti++) {
+                                        brw_rect(buf, cw, ch, btn_x + 1 + ti, btn_y + ti, 1, 10 - 2 * ti, icon);
+                                    }
+                                }
+                                /* Frame counter text on the right */
+                                char fc[16];
+                                int fi2 = 0;
+                                int fnum = T->video_frame + 1;
+                                int fcnt = T->video_frame_count;
+                                /* "n/m" formatted by hand */
+                                int digits[2][4]; int dlen[2];
+                                int vals[2] = { fnum, fcnt };
+                                for (int v = 0; v < 2; v++) {
+                                    int n = vals[v]; int dl = 0;
+                                    if (n <= 0) { digits[v][0] = 0; dl = 1; }
+                                    else { while (n > 0 && dl < 4) { digits[v][dl++] = n % 10; n /= 10; } }
+                                    dlen[v] = dl;
+                                }
+                                for (int d = dlen[0] - 1; d >= 0 && fi2 < 15; d--) fc[fi2++] = '0' + digits[0][d];
+                                if (fi2 < 15) fc[fi2++] = '/';
+                                for (int d = dlen[1] - 1; d >= 0 && fi2 < 15; d--) fc[fi2++] = '0' + digits[1][d];
+                                fc[fi2] = '\0';
+                                int tx2 = draw_x + dst_w - 4 - fi2 * 8;
+                                if (tx2 < draw_x + 18) tx2 = draw_x + 18;
+                                brw_text(buf, cw, ch, tx2, bar_y - 1, fc,
+                                         COLOR_RGB(220, 220, 220), COLOR_RGB(20, 20, 30));
+                            }
+                        }
+                        draw_y += dst_h + 4;
+                    } else {
+                        /* Render a "[video]" placeholder badge */
+                        int sy = CONTENT_Y + draw_y - T->scroll_y;
+                        if (sy >= CONTENT_Y && sy + 16 <= CONTENT_Y + CONTENT_H) {
+                            const char *msg = "[video]";
+                            for (int ci = 0; msg[ci]; ci++) {
+                                brw_char_transparent(buf, cw, ch, draw_x + ci * 8, sy,
+                                                     msg[ci], COLOR_RGB(180, 60, 60));
+                            }
+                        }
+                        draw_y += 20;
+                    }
+                    draw_x = 8 + cur_style()->padding_left;
+                    style_pop();
                     is_block = true;
                     last_was_space = true;
                     line_start = true;
